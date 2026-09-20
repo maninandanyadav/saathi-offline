@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SAATHI</title>
+  <link rel="icon" href="/static/images/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/css/chat.css">
+</head>
+<body>
+  <div class="app">
+
+    <header class="topbar">
+      <div class="brand">
+        <svg class="lotus" viewBox="0 0 48 30" aria-hidden="true">
+          <path d="M24 4 C21 10, 21 18, 24 25 C27 18, 27 10, 24 4 Z"/>
+          <path d="M24 25 C19 20, 13 15, 8 14 C9 20, 15 24, 24 26 Z"/>
+          <path d="M24 25 C29 20, 35 15, 40 14 C39 20, 33 24, 24 26 Z"/>
+          <path d="M24 26 C18 24, 11 22, 4 23 C8 27, 16 29, 24 27 Z"/>
+          <path d="M24 26 C30 24, 37 22, 44 23 C40 27, 32 29, 24 27 Z"/>
+        </svg>
+        <span class="wordmark">Saathi</span>
+      </div>
+      <div class="account">
+        <span id="whoami" class="whoami"></span>
+        <button id="logout" class="text-button" type="button">Log out</button>
+      </div>
+    </header>
+
+    <div class="layout">
+
+      <!-- Left: the conversation list -->
+      <aside class="sidebar">
+        <button id="new-chat" class="new-chat" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5 V19 M5 12 H19"/></svg>
+          New chat
+        </button>
+        <p id="sidebar-error" class="sidebar-error" hidden></p>
+        <p class="sidebar-label">Conversations</p>
+        <ul id="conversation-list" class="conversation-list"></ul>
+      </aside>
+
+      <!-- Right: the chat area -->
+      <main class="chat">
+
+        <div id="no-selection" class="empty-state">
+          <svg class="lotus" viewBox="0 0 48 30" aria-hidden="true">
+            <path d="M24 4 C21 10, 21 18, 24 25 C27 18, 27 10, 24 4 Z"/>
+            <path d="M24 25 C19 20, 13 15, 8 14 C9 20, 15 24, 24 26 Z"/>
+            <path d="M24 25 C29 20, 35 15, 40 14 C39 20, 33 24, 24 26 Z"/>
+            <path d="M24 26 C18 24, 11 22, 4 23 C8 27, 16 29, 24 27 Z"/>
+            <path d="M24 26 C30 24, 37 22, 44 23 C40 27, 32 29, 24 27 Z"/>
+          </svg>
+          <h2>Someone to talk to.</h2>
+          <p>Start a new conversation, or pick one from the list.</p>
+        </div>
+
+        <section id="conversation-view" class="conversation-view" hidden>
+          <header class="chat-header">
+            <button id="back" class="back-button" type="button" aria-label="Back to conversations">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5 L8 12 L15 19"/></svg>
+            </button>
+            <h2 id="conversation-title"></h2>
+            <div id="conversation-actions" class="conversation-actions">
+              <button id="rename-conversation" class="text-button" type="button">Rename</button>
+              <button id="delete-conversation" class="text-button danger" type="button">Delete</button>
+            </div>
+          </header>
+          <div id="messages" class="messages"></div>
+          <!-- Invisible on screen; screen readers read it aloud when it changes. -->
+          <p id="announcer" class="visually-hidden" aria-live="polite"></p>
+
+          <div id="reply-bar" class="reply-bar" hidden>
+            <div class="reply-bar-text">
+              <span id="reply-label" class="reply-bar-label"></span>
+              <span id="reply-preview" class="reply-bar-preview"></span>
+            </div>
+            <button id="reply-cancel" class="text-button" type="button">Cancel</button>
+          </div>
+          <p id="composer-error" class="composer-error" hidden></p>
+          <form id="composer" class="composer" novalidate>
+            <textarea id="message-input" rows="1" maxlength="4000"
+                      placeholder="Write a message…" aria-label="Message"></textarea>
+            <button id="send" class="send" type="submit" disabled aria-label="Send">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12 L20 4 L14 20 L11.5 13.5 Z M11.5 13.5 L20 4"/></svg>
+            </button>
+          </form>
+        </section>
+
+      </main>
+    </div>
+  </div>
+
+  <script src="/static/js/home.js"></script>
+</body>
+</html>

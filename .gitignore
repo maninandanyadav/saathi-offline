@@ -1,0 +1,15 @@
+# Never commit private data
+data/
+*.db
+*.db-journal
+
+# Never commit the toolbox or downloaded AI models
+venv/
+models/
+
+# Python leftovers
+__pycache__/
+*.pyc
+
+# Secrets
+.env

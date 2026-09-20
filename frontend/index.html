@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SAATHI</title>
+  <link rel="icon" href="/static/images/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+  <div class="scene">
+    <div class="sun"></div>
+    <div class="sea"></div>
+    <div class="foam"></div>
+    <div class="sand"></div>
+    <div class="wet"></div>
+    <img class="palm"  src="/static/images/palm.svg"  alt="">
+    <img class="birds" src="/static/images/birds.svg" alt="">
+  </div>
+
+  <main class="card">
+
+    <div class="crest">
+      <span class="rule"></span>
+      <svg class="lotus" viewBox="0 0 48 30" aria-hidden="true">
+        <path d="M24 4 C21 10, 21 18, 24 25 C27 18, 27 10, 24 4 Z"/>
+        <path d="M24 25 C19 20, 13 15, 8 14 C9 20, 15 24, 24 26 Z"/>
+        <path d="M24 25 C29 20, 35 15, 40 14 C39 20, 33 24, 24 26 Z"/>
+        <path d="M24 26 C18 24, 11 22, 4 23 C8 27, 16 29, 24 27 Z"/>
+        <path d="M24 26 C30 24, 37 22, 44 23 C40 27, 32 29, 24 27 Z"/>
+      </svg>
+      <span class="rule"></span>
+    </div>
+
+    <h1 class="logo">Saathi<svg class="heart" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 21 C6 16, 2 12, 2 8 A5 5 0 0 1 12 6 A5 5 0 0 1 22 8 C22 12, 18 16, 12 21 Z"/>
+      </svg></h1>
+
+    <p class="tagline">Welcome back</p>
+
+    <form id="login-form" novalidate>
+
+      <label class="field">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="8" r="3.4"/>
+          <path d="M5 20 C5 15.5, 8.5 13.5, 12 13.5 C15.5 13.5, 19 15.5, 19 20"/>
+        </svg>
+        <input id="saathi-id" type="text" placeholder="Your SAATHI ID"
+               autocomplete="username" maxlength="20">
+      </label>
+
+      <label class="field">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="5" y="10.5" width="14" height="9.5" rx="2.2"/>
+          <path d="M8.5 10.5 V7.5 a3.5 3.5 0 0 1 7 0 v3"/>
+        </svg>
+        <input id="password" type="password" placeholder="Your password"
+               autocomplete="current-password">
+      </label>
+
+      <p id="message" class="message" hidden></p>
+
+      <button id="submit" class="login" type="submit">
+        Login
+        <svg class="arrow" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M4 12 H19 M13 6 L19 12 L13 18"/>
+        </svg>
+      </button>
+
+    </form>
+
+    <p class="switch">Don't have an account? <a href="/signup">Create Account</a></p>
+    <p class="note">Private by design. Everything stays on this computer.</p>
+
+  </main>
+
+  <script src="/static/js/login.js"></script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+  <!-- The SAATHI lotus, filled in so it stays clear at tab-icon size. -->
+  <g transform="translate(0 9)" fill="#7f92f0" stroke="#5468d0" stroke-width="1.2" stroke-linejoin="round">
+    <path d="M24 4 C21 10, 21 18, 24 25 C27 18, 27 10, 24 4 Z"/>
+    <path d="M24 25 C19 20, 13 15, 8 14 C9 20, 15 24, 24 26 Z"/>
+    <path d="M24 25 C29 20, 35 15, 40 14 C39 20, 33 24, 24 26 Z"/>
+    <path d="M24 26 C18 24, 11 22, 4 23 C8 27, 16 29, 24 27 Z"/>
+    <path d="M24 26 C30 24, 37 22, 44 23 C40 27, 32 29, 24 27 Z"/>
+  </g>
+</svg>

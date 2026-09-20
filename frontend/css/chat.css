@@ -1,0 +1,596 @@
+/* ============================================================
+   SAATHI - the chat screen
+   The sunset lives on the login page. Here the words matter most,
+   so the surfaces stay calm and plain.
+   ============================================================ */
+
+/* ---- colours in one place ---- */
+:root {
+  --bg:          #f7f4ef;   /* warm paper */
+  --sidebar:     #f1ece4;
+  --surface:     #fffdf9;
+  --text:        #2f2d3a;
+  --muted:       #857f91;
+  --line:        #e4ddd1;
+  --accent:      #7f92f0;   /* the periwinkle from the Login button */
+  --accent-text: #5468d0;
+  --accent-soft: #e7eafc;
+  --user-bubble: #5a6cd4;   /* dark enough for white text to be easy to read */
+  --danger:      #b8434a;
+}
+
+/* follows the computer's dark mode - kinder to the eyes late at night */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:          #1b1c24;
+    --sidebar:     #20212b;
+    --surface:     #252633;
+    --text:        #ebeaf2;
+    --muted:       #9d9bab;
+    --line:        #34364b;
+    --accent:      #8e9ff3;
+    --accent-text: #aab7f8;
+    --accent-soft: #2d3150;
+    --user-bubble: #4b5cc2;
+    --danger:      #e3868a;
+  }
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+html, body { height: 100%; }
+body {
+  margin: 0;
+  font-family: system-ui, "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+button { font: inherit; color: inherit; }
+
+/* ---- the whole screen: top bar, then everything else ---- */
+.app {
+  height: 100vh;
+  height: 100dvh;           /* phones: ignores the browser's address bar */
+  display: grid;
+  grid-template-rows: auto 1fr;
+}
+
+/* ---- top bar ---- */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 20px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+.brand { display: flex; align-items: center; gap: 10px; }
+.lotus {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.3;
+  stroke-linejoin: round;
+}
+.brand .lotus { width: 30px; }
+.wordmark {
+  font-family: "Brush Script MT", "Segoe Script", cursive;
+  font-size: 1.9rem;
+  line-height: 1.1;
+  color: var(--accent-text);
+}
+.account {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  font-size: .92rem;
+}
+.whoami {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.text-button {
+  padding: 6px 2px;
+  border: 0;
+  background: none;
+  color: var(--accent-text);
+  font-weight: 600;
+  cursor: pointer;
+}
+.text-button:hover { text-decoration: underline; }
+
+/* ---- two columns: conversations | chat ---- */
+.layout {
+  display: grid;
+  /* minmax(0, 1fr) instead of 1fr: without it, one long unbroken word
+     can stretch the column wider than the screen. */
+  grid-template-columns: 290px minmax(0, 1fr);
+  min-height: 0;            /* lets each column scroll on its own */
+}
+
+/* ---- conversations column ---- */
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  padding: 16px 12px;
+  background: var(--sidebar);
+  border-right: 1px solid var(--line);
+}
+.new-chat {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 11px 14px;
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--accent-text);
+  font-weight: 600;
+  cursor: pointer;
+}
+.new-chat:hover    { background: var(--accent-soft); }
+.new-chat:disabled { opacity: .6; cursor: default; }
+.new-chat svg {
+  width: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+.sidebar-error {
+  margin: 10px 4px 0;
+  font-size: .85rem;
+  color: var(--danger);
+}
+.sidebar-label {
+  margin: 20px 8px 8px;
+  font-size: .72rem;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.conversation-list {
+  flex: 1;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+}
+.conversation {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+.conversation:hover  { background: rgba(127, 146, 240, .09); }
+.conversation.active { background: var(--accent-soft); }
+.conversation-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;   /* long titles end in ... instead of breaking the layout */
+  white-space: nowrap;
+}
+.conversation-time {
+  flex-shrink: 0;
+  font-size: .75rem;
+  color: var(--muted);
+}
+.list-note {
+  padding: 10px 12px;
+  font-size: .9rem;
+  color: var(--muted);
+}
+.list-note.error { color: var(--danger); }
+
+/* ---- chat column ---- */
+.chat {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.empty-state {
+  margin: auto;
+  padding: 24px;
+  max-width: 380px;
+  text-align: center;
+  color: var(--muted);
+}
+.empty-state .lotus { width: 64px; }
+.empty-state h2 {
+  margin: 14px 0 8px;
+  font-family: "Segoe Print", "Ink Free", cursive;
+  font-size: 1.25rem;
+  font-weight: 400;
+  color: var(--text);
+}
+.empty-state p { margin: 0; line-height: 1.5; }
+
+.conversation-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.chat-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 58px;
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--line);
+}
+.chat-header h2 {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.conversation-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 16px;
+}
+.text-button.danger,
+.message-actions button.danger { color: var(--danger); }
+
+/* renaming, or "are you sure?", shown right in the header */
+.header-edit {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  min-width: 0;
+}
+.header-edit input {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+}
+.header-edit input:focus { outline: none; }
+.header-error:empty { display: none; }
+.header-error {
+  width: 100%;
+  font-size: .82rem;
+  color: var(--danger);
+}
+.confirm-text {
+  align-self: center;
+  font-size: .88rem;
+}
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px 28px;
+}
+.empty-note {
+  margin-top: 40px;
+  text-align: center;
+  font-size: .92rem;
+  color: var(--muted);
+}
+.empty-note.error { color: var(--danger); }
+
+/* ---- message bubbles ---- */
+.message-row {
+  display: flex;
+  flex-direction: column;     /* the bubble, and under it its actions */
+  max-width: 760px;           /* comfortable reading width on big screens */
+  margin: 0 auto 12px;
+}
+.message-row.user   { align-items: flex-end; }
+.message-row.saathi { align-items: flex-start; }
+
+.bubble {
+  max-width: min(78%, 560px);
+  padding: 9px 14px 7px;
+  border-radius: 16px;
+  line-height: 1.45;
+  cursor: pointer;            /* click a message to see what you can do with it */
+}
+.bubble:focus-visible,
+.message-row.selected .bubble {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.bubble.typing { cursor: default; }
+
+/* ---- the small menu under a chosen message ---- */
+.message-actions {
+  display: flex;
+  flex-wrap: wrap;            /* four buttons still fit on a narrow phone */
+  gap: 6px;
+  margin-top: 6px;
+}
+.message-row.user .message-actions { justify-content: flex-end; }
+.message-actions button {
+  padding: 5px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: .85rem;
+  cursor: pointer;
+}
+.message-actions button:hover,
+.message-actions button:focus-visible {
+  border-color: var(--accent);
+  color: var(--accent-text);
+  outline: none;
+}
+.user .bubble {
+  background: var(--user-bubble);
+  color: #fff;
+  border-bottom-right-radius: 5px;
+}
+.saathi .bubble {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-bottom-left-radius: 5px;
+}
+.bubble-text {
+  margin: 0;
+  white-space: pre-wrap;      /* keep the person's own line breaks */
+  overflow-wrap: anywhere;    /* break very long words and links instead of overflowing */
+}
+.bubble-time {
+  display: block;
+  margin-top: 3px;
+  font-size: .7rem;
+  text-align: right;
+  opacity: .75;
+}
+
+/* the small quote inside a reply */
+.reply-quote {
+  margin: 2px 0 7px;
+  padding: 5px 9px;
+  border-left: 3px solid currentColor;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, .06);
+  font-size: .84rem;
+  opacity: .88;
+  overflow-wrap: anywhere;
+}
+.user .reply-quote       { background: rgba(255, 255, 255, .16); }
+.reply-quote.unavailable { font-style: italic; }
+.quote-sender {
+  display: block;
+  margin-bottom: 1px;
+  font-size: .74rem;
+  font-weight: 600;
+}
+
+/* ---- "Replying to ..." above the message box ---- */
+.reply-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: calc(100% - 48px);   /* lines up with the message box below */
+  max-width: 760px;
+  margin: 6px auto 0;
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  background: var(--accent-soft);
+}
+.reply-bar-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+.reply-bar-label {
+  font-size: .75rem;
+  font-weight: 600;
+  color: var(--accent-text);
+}
+.reply-bar-preview {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;      /* at most two lines, then "..." */
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  font-size: .88rem;
+}
+
+/* ---- writing a message ---- */
+.composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  width: 100%;
+  max-width: 808px;           /* lines up with the 760px messages above */
+  margin: 0 auto;
+  padding: 10px 24px 18px;
+}
+.composer textarea {
+  flex: 1;
+  min-width: 0;
+  max-height: 160px;          /* grows to about six lines, then scrolls */
+  padding: 11px 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  line-height: 1.4;
+  resize: none;
+  overflow-y: auto;
+}
+.composer textarea:focus {
+  outline: none;
+  border-color: var(--accent);   /* the border itself shows where you're typing */
+}
+.send {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--user-bubble);
+  color: #fff;
+  cursor: pointer;
+}
+.send:disabled { opacity: .4; cursor: default; }
+.send svg {
+  width: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.composer-error {
+  width: 100%;
+  max-width: 808px;
+  margin: 0 auto;
+  padding: 0 24px;
+  font-size: .85rem;
+  color: var(--danger);
+}
+
+/* ---- "Saathi is typing" ---- */
+.typing {
+  display: flex;
+  gap: 5px;
+  padding: 14px 16px;
+}
+.typing span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+  animation: typing 1.2s infinite ease-in-out;
+}
+.typing span:nth-child(2) { animation-delay: .15s; }
+.typing span:nth-child(3) { animation-delay: .3s; }
+@keyframes typing {
+  0%, 60%, 100% { opacity: .3; }
+  30%           { opacity: 1; }
+}
+/* people who switch off animations in their system settings get still dots */
+@media (prefers-reduced-motion: reduce) {
+  .typing span { animation: none; opacity: .6; }
+}
+
+/* ---- when SAATHI couldn't reply ---- */
+.reply-failed {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  max-width: 760px;
+  margin: 4px auto 12px;
+  font-size: .88rem;
+  color: var(--danger);
+}
+
+/* ---- the ← button: only phones need it ---- */
+.back-button {
+  display: none;
+  flex-shrink: 0;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  margin-left: -8px;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: var(--accent-text);
+  cursor: pointer;
+}
+.back-button:hover { background: var(--accent-soft); }
+.back-button svg {
+  width: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* ---- "Today" / "Yesterday" / "12 Sep 2026" between days ---- */
+.day-divider {
+  display: flex;
+  justify-content: center;
+  max-width: 760px;
+  margin: 6px auto 14px;
+}
+.day-divider span {
+  padding: 3px 12px;
+  border-radius: 999px;
+  background: var(--sidebar);
+  color: var(--muted);
+  font-size: .75rem;
+}
+
+/* ---- read aloud by screen readers, invisible on screen ---- */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ---- phones: one screen at a time, like a messaging app ---- */
+@media (max-width: 760px) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+  .sidebar { border-right: 0; }
+
+  .chat { display: none; }                          /* the list first...          */
+  .layout.show-chat .sidebar { display: none; }   /* ...then, with a chat open, */
+  .layout.show-chat .chat { display: flex; }      /* only the chat              */
+  .back-button { display: grid; }
+
+  .topbar         { padding: 6px 14px; }
+  .chat-header    { padding: 8px 14px; gap: 8px; }
+  .messages       { padding: 14px 14px 18px; }
+  .composer       { padding: 8px 12px 12px; }
+  .composer-error { padding: 0 12px; }
+  .reply-bar      { width: calc(100% - 24px); }
+  .bubble         { max-width: 86%; }
+}
+
+/* ---- touch screens: bigger targets for fingers (about 44px tall) ---- */
+@media (pointer: coarse) {
+  .conversation           { padding: 13px 12px; }
+  .message-actions button { padding: 12px 14px; }
+  .conversation-actions .text-button,
+  .header-edit .text-button,
+  .reply-bar .text-button { padding: 11px 6px; }
+}
