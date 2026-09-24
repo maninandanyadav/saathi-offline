@@ -19,6 +19,7 @@ import re
 import shutil
 import sys
 import tempfile
+import uuid
 import threading
 import time
 from pathlib import Path
@@ -35,7 +36,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 import requests  # noqa: E402  (imported after the setup above, on purpose)
 import uvicorn   # noqa: E402
 
-from backend import ai, chat  # noqa: E402
+from backend import ai, chat, context, letters  # noqa: E402
 from backend.database import DB_PATH, DEFAULT_DB_PATH, get_connection  # noqa: E402
 from backend.main import app  # noqa: E402
 
@@ -270,7 +271,7 @@ def run_checks():
     talk = [{"sender": "user", "content": "My exam is tomorrow."},
             {"sender": "saathi", "content": "That sounds stressful."},
             {"sender": "user", "content": "I'm nervous about it."}]
-    given = chat.to_ai_messages(talk)
+    given = context.to_ai_messages(talk)
     check("The whole recent conversation is sent, not just the last message", len(given) == 3, len(given))
     check("SAATHI's own past replies are marked as the assistant",
           [m["role"] for m in given] == ["user", "assistant", "user"], [m["role"] for m in given])
@@ -278,19 +279,54 @@ def run_checks():
           given[0]["content"] == talk[0]["content"] and given[-1]["content"] == talk[-1]["content"])
 
     huge = [{"sender": "user", "content": f"{i:02d} " + "x" * 497} for i in range(30)]
-    trimmed = chat.to_ai_messages(huge)
-    sent = sum(len(m["content"]) for m in trimmed)
+    trimmed = context.to_ai_messages(huge)
+    spent = sum(context.estimate_tokens(m["content"]) for m in trimmed)
     check("A very long conversation is trimmed to the budget",
-          sent <= chat.CONTEXT_CHARACTERS, f"{sent} of {chat.CONTEXT_CHARACTERS} characters")
+          spent <= context.CONTEXT_TOKENS, f"{spent} of {context.CONTEXT_TOKENS} tokens")
     check("...and it keeps the NEWEST messages, dropping the oldest",
           trimmed[-1]["content"].startswith("29") and not trimmed[0]["content"].startswith("00"))
     check("One huge message still gets through on its own",
-          len(chat.to_ai_messages([{"sender": "user", "content": "y" * 20000}])) == 1)
-    check("An empty conversation doesn't break it", chat.to_ai_messages([]) == [])
+          len(context.to_ai_messages([{"sender": "user", "content": "y" * 20000}])) == 1)
+    check("An empty conversation doesn't break it", context.to_ai_messages([]) == [])
+
+    section("COUNTING THE COST (tokens, not characters)")
+    english = "I had a really long day at college today and I am very tired now."
+    telugu = "ఈ రోజు కాలేజీలో చాలా అలసటగా అనిపించింది."
+    check("Telugu costs more per letter than English",
+          context.estimate_tokens(telugu) / len(telugu)
+          > context.estimate_tokens(english) / len(english))
+    check("A mixed message is counted letter by letter",
+          context.estimate_tokens("Ela unnavu? ఈ రోజు బాగుంది.")
+          > context.estimate_tokens("Ela unnavu? today is fine."))
+    check("An empty message costs only the who-said-it marks",
+          context.estimate_tokens("") == context.PER_MESSAGE_COST)
+
+    def prompt_tokens(text):
+        """Ask the model itself how many tokens a message really costs."""
+        body = {"model": ai.MODEL, "stream": False, "keep_alive": ai.KEEP_LOADED,
+                "options": {"num_predict": 1, "num_ctx": context.CONTEXT_TOKENS},
+                # a unique marker, so Ollama's memory of earlier prompts
+                # can never make this count come out low
+                "messages": [{"role": "user", "content": uuid.uuid4().hex + text}]}
+        return requests.post(ai.OLLAMA_URL, json=body, timeout=120).json()["prompt_eval_count"]
+
+    overhead = prompt_tokens("")
+    for name, sample in (("English", english), ("Telugu", telugu)):
+        guess = context.estimate_tokens(sample)
+        really = prompt_tokens(sample) - overhead
+        check(f"The guess is never below what the model really uses ({name})",
+              guess >= really, f"guessed {guess}, really {really}")
+
+    telugu_chat = [{"sender": "user", "content": telugu} for _ in range(200)]
+    kept = context.to_ai_messages(telugu_chat)
+    spent = sum(context.estimate_tokens(m["content"]) for m in kept)
+    check("A long Telugu conversation is trimmed by tokens, not letters",
+          spent <= context.CONTEXT_TOKENS, f"{spent} of {context.CONTEXT_TOKENS} tokens")
+    check("...and it still keeps a useful number of messages", len(kept) > 5, f"{len(kept)} messages")
 
     section("REPLYING TO ONE MESSAGE (what the AI is told)")
     pair = [{"role": "user", "content": "older"}, {"role": "user", "content": "That part was hard."}]
-    note = chat.with_reply_context(pair, {"available": True, "sender": "saathi",
+    note = context.with_reply_context(pair, {"available": True, "sender": "saathi",
                                           "content": "How was your presentation?"})
     check("The quoted message is attached to the NEWEST message",
           "How was your presentation?" in note[-1]["content"]
@@ -298,15 +334,15 @@ def run_checks():
     check("Earlier messages are left untouched", note[0] == pair[0])
     check("It says whose message it was",
           "of yours" in note[-1]["content"]
-          and "of their own" in chat.with_reply_context(
+          and "of their own" in context.with_reply_context(
               pair, {"available": True, "sender": "user", "content": "x"})[-1]["content"])
-    deleted = chat.with_reply_context(pair, {"id": 7, "available": False})[-1]["content"]
+    deleted = context.with_reply_context(pair, {"id": 7, "available": False})[-1]["content"]
     check("A deleted original says so, and carries no words from it",
           "Original message unavailable" in deleted and len(deleted.splitlines()[0]) < 100, deleted.splitlines()[0])
-    check("A message that isn't a reply is left alone", chat.with_reply_context(pair, None) == pair)
-    long_note = chat.with_reply_context(
+    check("A message that isn't a reply is left alone", context.with_reply_context(pair, None) == pair)
+    long_note = context.with_reply_context(
         pair, {"available": True, "sender": "user", "content": "long " * 400})[-1]["content"].splitlines()[0]
-    check("A very long original is shortened", len(long_note) < chat.QUOTE_LENGTH + 80, f"{len(long_note)} characters")
+    check("A very long original is shortened", len(long_note) < context.QUOTE_LENGTH + 80, f"{len(long_note)} characters")
 
     section("STREAMING (words arrive as they are written)")
     live = a.post(f"{BASE}/api/conversations").json()["id"]
@@ -355,7 +391,7 @@ def run_checks():
         ai.REPLY_TIMEOUT = kept[2]
 
         empty = type("Empty", (), {"status_code": 200, "json": lambda self: {"message": {"content": "   "}}})
-        ai.ask_ollama = lambda messages, stream: empty()
+        ai.ask_ollama = lambda messages, stream, background=None: empty()
         r = ask_reply(a, broken)
         check("Empty reply -> asks them to try again",
               r.status_code == 503 and r.json()["detail"] == ai.NO_WORDS, r.json().get("detail", "")[:45])
@@ -460,6 +496,178 @@ def run_checks():
           r.status_code == 201 and len(r.json().get("content", "")) > 0, r.status_code)
     check("...and only ONE reply was kept in the end",
           [m["sender"] for m in messages_in(a, recover)] == ["user", "saathi"])
+
+    section("LONG CONVERSATIONS (the notes SAATHI keeps)")
+    one_message = [{"sender": "user", "content": "hello"}]
+    notes_text = "They are building a project called SAATHI with their friend Ravi."
+    plan = context.build(one_message, None, notes_text)
+    check("The notes travel beside the messages, never as one of them",
+          plan["background"] == notes_text
+          and all("SAATHI" not in m["content"] for m in plan["messages"]))
+    check("No notes means nothing extra is sent", context.build(one_message)["background"] is None)
+
+    many = [{"sender": "user", "content": "y" * 200} for _ in range(40)]
+    check("Long notes leave less room for messages",
+          len(context.build(many, None, "x" * 4000)["messages"]) < len(context.build(many)["messages"]))
+
+    with get_connection() as connection:
+        user_a_id = connection.execute(
+            "SELECT id FROM users WHERE saathi_id = 'user_a'").fetchone()["id"]
+        user_b_id = connection.execute(
+            "SELECT id FROM users WHERE saathi_id = 'user_b'").fetchone()["id"]
+
+    long_chat = chat.create_conversation(user_a_id)["id"]
+    chat.add_user_message(user_a_id, long_chat,
+                          "My project is called ZEPHYR-9 and I build it with my friend Ravi.")
+    chat.save_saathi_message(user_a_id, long_chat, "That sounds like a lot of work.")
+    check("A short conversation needs no notes",
+          chat.update_summary_if_needed(user_a_id, long_chat) is None)
+
+    for number in range(30):      # push those first messages far out of sight
+        chat.add_user_message(user_a_id, long_chat, f"Day {number}: classes were long today.")
+        chat.save_saathi_message(user_a_id, long_chat, f"That sounds tiring, day {number}.")
+
+    check("A stranger cannot make notes on someone else's conversation",
+          chat.update_summary_if_needed(user_b_id, long_chat) is None)
+
+    written = chat.update_summary_if_needed(user_a_id, long_chat)
+    check("Once it grows, the notes get written", bool(written), str(written)[:40])
+    check("The notes keep a fact that has scrolled out of sight",
+          bool(written) and "ZEPHYR" in written.upper(), str(written)[:60])
+
+    chat.add_user_message(user_a_id, long_chat, "What was my project called?")
+    grown = chat.prepare_reply(user_a_id, long_chat)
+    sent_now = " ".join(m["content"] for m in grown["messages"])
+    check("...a fact the recent messages no longer carry on their own",
+          "ZEPHYR" not in sent_now.upper()
+          or any("ZEPHYR" in m["content"].upper() for m in grown["recalled"]))
+    check("...and the notes are handed to the AI with the next reply",
+          grown["background"] == written)
+
+    check("The notes are written only once, not on every message",
+          chat.update_summary_if_needed(user_a_id, long_chat) is None)
+
+    with get_connection() as connection:
+        a_message = connection.execute(
+            "SELECT id FROM messages WHERE conversation_id = ? ORDER BY id LIMIT 1",
+            (long_chat,)).fetchone()["id"]
+    chat.delete_message(user_a_id, long_chat, a_message)
+    with get_connection() as connection:
+        after_delete = connection.execute(
+            "SELECT summary FROM conversations WHERE id = ?", (long_chat,)).fetchone()["summary"]
+    check("Deleting a message throws the notes away with it", after_delete is None, str(after_delete)[:40])
+
+    section("BRINGING BACK AN OLDER MESSAGE (7D)")
+    check("Everyday words are not matched on",
+          context.meaningful_words("What was that about the thing") == set(),
+          context.meaningful_words("What was that about the thing"))
+    check("Real words are kept, punctuation ignored",
+          context.meaningful_words("My viva is in room B-214!") == {"viva", "room", "214"},
+          context.meaningful_words("My viva is in room B-214!"))
+    check("Telugu words are matched too",
+          "ప్రాజెక్ట్" in context.meaningful_words("నా ప్రాజెక్ట్ పేరు సాథి"))
+
+    older_messages = [
+        {"id": 1, "sender": "user", "content": "I lent my Data Structures book to Sravani."},
+        {"id": 2, "sender": "saathi", "content": "Got it, I will remember that."},
+        {"id": 3, "sender": "user", "content": "My viva is in room B-214 with Professor Meena."},
+        {"id": 4, "sender": "user", "content": "The weather was nice today."},
+    ]
+    found = context.find_relevant("Who did I lend my Data Structures book to?", older_messages)
+    check("The message that shares real words is found",
+          bool(found) and found[0]["id"] == 1, [m["id"] for m in found])
+    check("One shared word alone is not enough",
+          context.find_relevant("Tell me about the weather", older_messages) == [],
+          [m["id"] for m in context.find_relevant("Tell me about the weather", older_messages)])
+    check("A question about nothing in particular brings nothing back",
+          context.find_relevant("okay thanks", older_messages) == [])
+    check("At most two messages come back",
+          len(context.find_relevant("book room viva Sravani Data Structures Meena",
+                                    older_messages)) <= context.RECALL_MESSAGES)
+
+    pair = [{"role": "user", "content": "older one"}, {"role": "user", "content": "Which room?"}]
+    noted = context.with_recalled(pair, [older_messages[2]])
+    check("It is attached to the NEWEST message only",
+          "B-214" in noted[-1]["content"] and "B-214" not in noted[0]["content"])
+    check("It says who said it", "They said earlier" in noted[-1]["content"])
+    check("SAATHI's own older words are marked as its own",
+          "You said earlier" in context.with_recalled(pair, [older_messages[1]])[-1]["content"])
+    long_one = [{"id": 9, "sender": "user", "content": "viva room " + "z" * 3000}]
+    check("A very long older message is shortened",
+          len(context.with_recalled(pair, long_one)[-1]["content"]) < 700,
+          len(context.with_recalled(pair, long_one)[-1]["content"]))
+    check("Nothing is brought back when there is nothing older",
+          context.build([{"sender": "user", "content": "Which room?"}])["recalled"] == [])
+
+    # end to end, through the database, with no AI needed
+    recall_chat = chat.create_conversation(user_a_id)["id"]
+    chat.add_user_message(user_a_id, recall_chat,
+                          "The hostel wifi password is bluepeak77 by the way.")
+    chat.save_saathi_message(user_a_id, recall_chat, "Noted.")
+    for number in range(40):
+        chat.add_user_message(user_a_id, recall_chat, f"Day {number}: nothing much happened.")
+        chat.save_saathi_message(user_a_id, recall_chat, f"Quiet day {number}, then.")
+    chat.add_user_message(user_a_id, recall_chat, "What is the hostel wifi password again?")
+
+    recall_plan = chat.prepare_reply(user_a_id, recall_chat)
+    sent_text = " ".join(m["content"] for m in recall_plan["messages"])
+    check("An old message is brought back out of the database",
+          any("bluepeak77" in m["content"] for m in recall_plan["recalled"]),
+          [m["content"][:40] for m in recall_plan["recalled"]])
+    check("...and it reaches what the AI is told", "bluepeak77" in sent_text)
+
+    # the same conversation, with that old message deleted
+    with get_connection() as connection:
+        secret_id = connection.execute(
+            "SELECT id FROM messages WHERE conversation_id = ? ORDER BY id LIMIT 1",
+            (recall_chat,)).fetchone()["id"]
+    chat.delete_message(user_a_id, recall_chat, secret_id)
+    after_delete_plan = chat.prepare_reply(user_a_id, recall_chat)
+    check("A deleted message is never brought back",
+          all("bluepeak77" not in m["content"] for m in after_delete_plan["messages"]))
+
+    section("TELUGU IN THE LETTERS YOU WRITE IN")
+    check("Telugu script becomes a-z letters",
+          letters.to_english_letters("చాలా బాధగా ఉంది") == "chala badhaga undi",
+          letters.to_english_letters("చాలా బాధగా ఉంది"))
+    check("The dot is n before most sounds, m at the end of a word",
+          letters.to_english_letters("ఉంది") == "undi"
+          and letters.to_english_letters("సిద్ధం") == "siddham",
+          letters.to_english_letters("ఉంది") + " / " + letters.to_english_letters("సిద్ధం"))
+    check("English inside a Telugu sentence is left alone",
+          "exam" in letters.to_english_letters("exam గురించి"))
+    check("A message with no Telugu is untouched",
+          letters.to_english_letters("I am fine, thanks.") == "I am fine, thanks.")
+
+    check("Telugu typed in a-z letters is recognised",
+          letters.wants_english_letters("Repu exam undi, konchem nervous ga undi."))
+    check("Telugu script is left as script",
+          not letters.wants_english_letters("ఈ రోజు కష్టంగా ఉంది"))
+    check("Plain English is not mistaken for Telugu",
+          not letters.wants_english_letters("I had a long day at college."))
+
+    typed_in_english = [{"sender": "user", "content": "Ela unnavu?"},
+                        {"sender": "saathi", "content": "నేను బాగున్నాను."}]
+    check("Someone who types in a-z letters is shown a-z letters",
+          letters.person_writes_in_english(typed_in_english))
+    check("...and SAATHI's Telugu is converted for them",
+          chat.shown_as_they_write(typed_in_english)[1]["content"] == "nenu bagunnanu.",
+          chat.shown_as_they_write(typed_in_english)[1]["content"])
+    check("...while their own words are never touched",
+          chat.shown_as_they_write(typed_in_english)[0]["content"] == "Ela unnavu?")
+
+    typed_in_script = [{"sender": "user", "content": "ఈ రోజు ఎలా ఉంది?"},
+                       {"sender": "saathi", "content": "నేను బాగున్నాను."}]
+    check("Someone who types Telugu script keeps seeing Telugu script",
+          chat.shown_as_they_write(typed_in_script)[1]["content"] == "నేను బాగున్నాను.")
+
+    streamed = letters.AsTheyWrite(True)
+    out = "".join(streamed.feed(piece) for piece in ["చా", "లా బాధ", "గా ఉం", "ది."]) + streamed.finish()
+    check("Streaming converts whole words, even when pieces split them",
+          out == "chala badhaga undi.", out)
+    untouched = letters.AsTheyWrite(False)
+    check("...and an English reply streams through unchanged",
+          "".join(untouched.feed(p) for p in ["That ", "sounds ", "hard."]) == "That sounds hard.")
 
     section("LOGOUT")
     copied_token = a.cookies.get("saathi_session")

@@ -42,6 +42,22 @@ def get_connection():
         connection.close()  # and always close
 
 
+def add_column_if_missing(connection, table, column, kind):
+    """Add a column to a table that already exists.
+
+    CREATE TABLE IF NOT EXISTS does NOTHING to a table that is already there.
+    So when a later step needs a new column - like Step 7C's conversation
+    summary - the column has to be added on purpose, or your existing
+    conversations would keep the old shape and SAATHI would fail on them.
+
+    The table and column names come from our own code here, never from
+    anything typed in, which is why they can be written into the SQL.
+    """
+    already = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+    if column not in already:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+
+
 def init_db():
     """Create the tables if they don't exist. Safe to run on every startup."""
     with get_connection() as connection:
@@ -98,6 +114,16 @@ def init_db():
             )
             """
         )
+
+        # ------------------------------------------------ Step 7C: the summary
+        # A long conversation cannot all be sent to the AI, so the older part
+        # is kept as a few sentences here. It belongs to this conversation
+        # only: delete the conversation and the summary goes with it, and no
+        # other conversation can ever see it.
+        add_column_if_missing(connection, "conversations", "summary", "TEXT")
+        # Which message the summary covers up to. Everything newer than this
+        # is still sent to the AI in full.
+        add_column_if_missing(connection, "conversations", "summary_upto_message_id", "INTEGER")
 
         # Indexes work like the index at the back of a book: SQLite can jump
         # straight to one user's conversations, or one conversation's messages,

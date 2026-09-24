@@ -6,8 +6,13 @@ touches that person's own data. The id always comes from the session,
 never from anything the browser sends.
 """
 
-from backend import ai
+import logging
+import threading
+
+from backend import ai, context, letters
 from backend.database import get_connection
+
+log = logging.getLogger("saathi.chat")
 
 
 def to_iso(sqlite_time):
@@ -37,7 +42,8 @@ def owned_conversation(connection, user_id, conversation_id):
     """
     return connection.execute(
         """
-        SELECT id, title, created_at, updated_at
+        SELECT id, title, created_at, updated_at,
+               summary, summary_upto_message_id
         FROM conversations
         WHERE id = ? AND user_id = ?
         """,
@@ -142,10 +148,36 @@ def get_conversation(user_id, conversation_id):
             (conversation_id,),
         ).fetchall()
 
+    messages = [message_to_dict(row) for row in rows]
     return {
         "conversation": conversation_to_dict(conversation),
-        "messages": [message_to_dict(row) for row in rows],
+        "messages": shown_as_they_write(messages),
     }
+
+
+def how_they_write(user_id, conversation_id):
+    """Does this person type Telugu in a-z letters in this conversation?"""
+    opened = get_conversation(user_id, conversation_id)
+    return bool(opened) and letters.person_writes_in_english(opened["messages"])
+
+
+def shown_as_they_write(messages):
+    """Show SAATHI's Telugu in the letters this person uses.
+
+    The model's Telugu is STORED in Telugu script, because that is what keeps
+    it writing good Telugu - seeing its own a-z replies in the conversation
+    made it copy that style and invent words. Only the way it is shown
+    changes, and only for someone who types Telugu in a-z letters themselves.
+    """
+    if not letters.person_writes_in_english(messages):
+        return messages
+
+    shown = []
+    for message in messages:
+        if message["sender"] == "saathi" and letters.has_telugu(message["content"]):
+            message = {**message, "content": letters.to_english_letters(message["content"])}
+        shown.append(message)
+    return shown
 
 
 # ---------------------------------------------------------------- writing messages
@@ -270,6 +302,11 @@ def delete_message(user_id, conversation_id, message_id):
 
     An empty marker stays behind, so a reply to it can still say
     "Original message unavailable" instead of pretending it was never a reply.
+
+    The conversation's notes are thrown away at the same time. Those notes
+    were written FROM the messages, so they could still be carrying the words
+    that were just deleted. They are rebuilt later from what remains - which
+    is the only honest way to keep "delete" meaning delete.
     """
     with get_connection() as connection:
         if find_message(connection, user_id, conversation_id, message_id) is None:
@@ -281,6 +318,11 @@ def delete_message(user_id, conversation_id, message_id):
             WHERE id = ?
             """,
             (message_id,),
+        )
+        connection.execute(
+            "UPDATE conversations SET summary = NULL, summary_upto_message_id = NULL "
+            "WHERE id = ?",
+            (conversation_id,),
         )
     return True
 
@@ -317,24 +359,49 @@ def delete_conversation(user_id, conversation_id):
 
 # ---------------------------------------------------------------- SAATHI's reply
 
-CONTEXT_MESSAGES = 20   # how many recent messages SAATHI reads before replying
+# How many recent messages to READ from the database. This is only a rough
+# net to keep the query small - the real limit is context.CONTEXT_TOKENS,
+# which decides how many of these actually reach the model. Short messages
+# are cheap, so 40 of them usually fit; a few long ones will not, and the
+# token budget trims them.
+CONTEXT_MESSAGES = 40
+
+# How far back Step 7D may look for a message that matters right now. These
+# are only SEARCHED, never all sent - at most two of them are brought back.
+SEARCHABLE_MESSAGES = 300
 
 
-def build_context(connection, conversation, limit=CONTEXT_MESSAGES):
-    """Everything SAATHI should know before replying, gathered in one place.
+def gather_from_database(connection, conversation, limit=CONTEXT_MESSAGES):
+    """Read the raw material for a reply out of the database.
 
-    In Step 6 this becomes the input for the local AI:
-        conversation info + recent messages + the message being replied to
+    This is the database half of the work: the conversation, its recent
+    messages in order, and the one message being replied to (fetched in full,
+    because it may be older than the recent messages). Shaping all of this
+    into what the AI is told is context.build()'s job, not this one.
     """
+    # Everything since the summary leaves off - NOT "the newest 40".
+    #
+    # This matters more than it looks. With a sliding window, every new message
+    # pushed the oldest one out, so the conversation the model was given
+    # changed at its START every single turn. Ollama could then reuse nothing
+    # it had already read, and on this computer a 62-message conversation cost
+    # about 40 seconds PER REPLY, over and over.
+    #
+    # Anchored to the summary, the conversation only ever GROWS at the end
+    # between one summary and the next, so everything before stays word for
+    # word the same and Ollama reads only the new message. The anchor moves in
+    # steps of twenty, when the notes are rewritten - not every turn.
+    anchor = conversation["summary_upto_message_id"] or 0
     rows = connection.execute(
         MESSAGE_SELECT
         + """
         WHERE m.conversation_id = ?
           AND m.deleted_at IS NULL
+          AND m.id > ?           -- everything the notes do not already cover
         ORDER BY m.id DESC
         LIMIT ?
         """,
-        (conversation["id"], limit),
+        (conversation["id"], anchor, limit),
     ).fetchall()
 
     recent = [message_to_dict(row) for row in reversed(rows)]   # oldest first, like reading
@@ -361,79 +428,55 @@ def build_context(connection, conversation, limit=CONTEXT_MESSAGES):
                 "content": original["content"],
             }
 
+    # Step 7D: the messages BEFORE the recent window, so one of them can be
+    # brought back if it turns out to matter. Only this conversation is read -
+    # the WHERE below cannot see another conversation, let alone another
+    # person's. Searching them is context.find_relevant()'s job, not this one.
+    oldest_shown = recent[0]["id"] if recent else None
+    older = []
+    if oldest_shown is not None:
+        older = [dict(row) for row in connection.execute(
+            """
+            SELECT id, sender, content FROM messages
+            WHERE conversation_id = ?
+              AND deleted_at IS NULL     -- deleted words are never searched
+              AND id < ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (conversation["id"], oldest_shown, SEARCHABLE_MESSAGES),
+        ).fetchall()]
+
     return {
         "conversation": {"id": conversation["id"], "title": conversation["title"]},
         "recent_messages": recent,
         "replying_to": replying_to,
+        "summary": conversation["summary"],      # the older part, in a few sentences
+        "older_messages": older,                 # searchable, not sent
     }
-
-
-CONTEXT_CHARACTERS = 6000   # roughly how much conversation we hand to the AI
-
-
-def to_ai_messages(recent):
-    """Turn recent messages into the form the AI expects.
-
-    The AI can only hold so much text at once, so we start from the newest
-    message and work backwards until we reach the budget. The newest messages
-    always get through; the oldest are the ones dropped.
-    """
-    chosen, used = [], 0
-    for message in reversed(recent):                 # newest first
-        used += len(message["content"])
-        if used > CONTEXT_CHARACTERS and chosen:     # always keep at least one
-            break
-        chosen.append({
-            # the AI calls SAATHI's own past messages "assistant"
-            "role": "assistant" if message["sender"] == "saathi" else "user",
-            "content": message["content"],
-        })
-    chosen.reverse()                                 # back to oldest-first, like reading
-    return chosen
-
-
-QUOTE_LENGTH = 400   # how much of a replied-to message to show the AI
-
-
-def with_reply_context(messages, replying_to):
-    """Tell the AI which earlier message the newest one is answering.
-
-    The note is attached to the newest message, so the AI reads "what you are
-    answering" right beside "what they said". A deleted original cannot leak
-    here: its words were erased from the database when it was deleted.
-    """
-    if not replying_to or not messages:
-        return messages
-
-    if replying_to.get("available"):
-        whose = "yours" if replying_to["sender"] == "saathi" else "their own"
-        note = f'[Replying to this earlier message of {whose}: "{shorten(replying_to["content"], QUOTE_LENGTH)}"]'
-    else:
-        note = "[Replying to an earlier message. Original message unavailable - it was deleted.]"
-
-    newest = messages[-1]
-    return messages[:-1] + [{**newest, "content": f'{note}\n\n{newest["content"]}'}]
 
 
 def prepare_reply(user_id, conversation_id):
     """Everything that happens BEFORE SAATHI speaks.
 
-    Checks the conversation is theirs, gathers the recent messages (6E) and
-    the message being replied to (6F), and builds exactly what the AI is sent.
+    Two clear halves:
+      1. here - check the conversation is theirs, and read it from the database
+      2. context.build() - decide what the AI is actually told
+
     Returns those messages, or None if the conversation isn't theirs.
     """
     with get_connection() as connection:
         conversation = owned_conversation(connection, user_id, conversation_id)
         if conversation is None:
             return None
-        context = build_context(connection, conversation)
+        gathered = gather_from_database(connection, conversation)
 
-    latest = context["recent_messages"][-1] if context["recent_messages"] else None
+    latest = gathered["recent_messages"][-1] if gathered["recent_messages"] else None
     if latest is None or latest["sender"] != "user":
         raise NothingToReplyTo("There's no new message to reply to.")
 
-    messages = to_ai_messages(context["recent_messages"])
-    return with_reply_context(messages, context["replying_to"])
+    return context.build(gathered["recent_messages"], gathered["replying_to"],
+                         gathered["summary"], gathered["older_messages"])
 
 
 def save_saathi_message(user_id, conversation_id, text):
@@ -450,7 +493,114 @@ def add_saathi_reply(user_id, conversation_id):
     The slow part happens between the two database visits, so no connection
     is held open while the AI thinks.
     """
-    messages = prepare_reply(user_id, conversation_id)
-    if messages is None:
+    plan = prepare_reply(user_id, conversation_id)
+    if plan is None:
         return None
-    return save_saathi_message(user_id, conversation_id, ai.reply(messages))
+    text = ai.reply(plan["messages"], plan["background"])
+    saved = save_saathi_message(user_id, conversation_id, text)
+    if saved is None:
+        return None
+    # Shown in their letters; the Telugu script stays in the database.
+    if letters.has_telugu(saved["content"]) and how_they_write(user_id, conversation_id):
+        saved = {**saved, "content": letters.to_english_letters(saved["content"])}
+    return saved
+
+
+# ---------------------------------------------------------------- the summary (7C)
+
+# How many messages must fall out of sight before SAATHI writes notes about
+# them. Writing notes costs a whole extra visit to the AI, so it is done in
+# batches rather than every time one message scrolls out.
+SUMMARIZE_AFTER = 20
+
+# Conversations whose notes are being written right now, so two replies
+# arriving close together can never start the same job twice.
+being_summarized = set()
+
+
+# How many recent messages stay in full when the notes are rewritten. The
+# conversation sent to the AI therefore moves between 20 and 40 messages, and
+# grows only at its end in between - which is what keeps replies fast.
+KEEP_IN_FULL = 20
+
+
+def messages_to_fold(connection, conversation_id, already_covered):
+    """The messages ready to become notes: everything since the last notes,
+    except the newest KEEP_IN_FULL, which stay in the conversation in full.
+
+    Returns nothing until there are enough of them to be worth one visit to
+    the AI, so the notes are rewritten roughly every twenty messages instead
+    of every single time somebody speaks.
+    """
+    since_notes = connection.execute(
+        """
+        SELECT id, sender, content FROM messages
+        WHERE conversation_id = ? AND deleted_at IS NULL
+          AND id > ?           -- not already written into the notes
+        ORDER BY id
+        """,
+        (conversation_id, already_covered or 0),
+    ).fetchall()
+
+    if len(since_notes) <= KEEP_IN_FULL:
+        return []
+    foldable = since_notes[:-KEEP_IN_FULL]
+    return foldable if len(foldable) >= SUMMARIZE_AFTER else []
+
+
+def update_summary_if_needed(user_id, conversation_id):
+    """Fold the older part of a long conversation into a few sentences.
+
+    Returns the new notes, or None if nothing needed doing. Notice the
+    database connection is closed BEFORE the AI is asked: writing notes takes
+    many seconds, and holding the database open that long would block
+    everything else.
+    """
+    with get_connection() as connection:
+        conversation = owned_conversation(connection, user_id, conversation_id)
+        if conversation is None:
+            return None
+        older = messages_to_fold(connection, conversation_id,
+                                 conversation["summary_upto_message_id"])
+        if len(older) < SUMMARIZE_AFTER:
+            return None
+        previous = conversation["summary"]
+        forget_after = older[-1]["id"]
+        older = [dict(row) for row in older]
+
+    notes = ai.summarize(previous, older)      # slow, and no connection is held
+    if notes is None:
+        return None                            # try again after the next reply
+
+    with get_connection() as connection:
+        if owned_conversation(connection, user_id, conversation_id) is None:
+            return None                        # deleted while the notes were written
+        connection.execute(
+            "UPDATE conversations SET summary = ?, summary_upto_message_id = ? WHERE id = ?",
+            (notes, forget_after, conversation_id),
+        )
+    log.info("Wrote notes for conversation %s, covering up to message %s",
+             conversation_id, forget_after)
+    return notes
+
+
+def update_summary_in_background(user_id, conversation_id):
+    """Write the notes while the person reads the reply, so nobody waits.
+
+    If anything goes wrong it is written to the terminal and forgotten. A
+    failed summary must never break a conversation - the next reply simply
+    tries again.
+    """
+    if conversation_id in being_summarized:
+        return
+    being_summarized.add(conversation_id)
+
+    def work():
+        try:
+            update_summary_if_needed(user_id, conversation_id)
+        except Exception as problem:               # noqa: BLE001 - nothing may escape
+            log.exception("Writing the notes failed: %s", problem)
+        finally:
+            being_summarized.discard(conversation_id)
+
+    threading.Thread(target=work, daemon=True).start()

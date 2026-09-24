@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from backend import ai, auth, chat, database
+from backend import ai, auth, chat, database, letters
 
 # Worked out from this file's location, so it never depends on which
 # folder you started the server from.
@@ -221,6 +221,10 @@ def reply(conversation_id: int, user=Depends(require_user)):
         raise HTTPException(status_code=503, detail=str(error))
     if message is None:
         raise HTTPException(status_code=404, detail="Conversation not found.")
+
+    # The reply is safely saved. Now, while the person reads it, SAATHI folds
+    # any messages that have scrolled out of sight into its notes (Step 7C).
+    chat.update_summary_in_background(user["id"], conversation_id)
     return message
 
 
@@ -234,23 +238,34 @@ def reply_streaming(conversation_id: int, user=Depends(require_user)):
         {"error": "..."}      something went wrong; the text is safe to show
     """
     try:
-        messages = chat.prepare_reply(user["id"], conversation_id)
+        plan = chat.prepare_reply(user["id"], conversation_id)
     except chat.NothingToReplyTo as error:
         raise HTTPException(status_code=409, detail=str(error))
-    if messages is None:
+    if plan is None:
         raise HTTPException(status_code=404, detail="Conversation not found.")
+
+    # Telugu is stored in Telugu script, but shown in the letters this person
+    # writes in. The conversion happens here, on the way to the screen only.
+    as_they_write = letters.AsTheyWrite(chat.how_they_write(user["id"], conversation_id))
 
     def lines():
         pieces = []
         try:
-            for piece in ai.stream_reply(messages):
-                pieces.append(piece)
-                yield json.dumps({"chunk": piece}) + "\n"
+            for piece in ai.stream_reply(plan["messages"], plan["background"]):
+                pieces.append(piece)                       # kept as written
+                shown = as_they_write.feed(piece)          # shown their way
+                if shown:
+                    yield json.dumps({"chunk": shown}) + "\n"
+            last = as_they_write.finish()
+            if last:
+                yield json.dumps({"chunk": last}) + "\n"
         except ai.AIUnavailable as error:
             yield json.dumps({"error": str(error)}) + "\n"
             return
 
-        text = "".join(pieces).strip()
+        # One last tidy before it is stored, so a note the model copied into
+        # its own words can never be saved into the conversation.
+        text = ai.without_notes("".join(pieces))
         if not text:
             yield json.dumps({"error": ai.NO_WORDS}) + "\n"
             return
@@ -258,7 +273,10 @@ def reply_streaming(conversation_id: int, user=Depends(require_user)):
         saved = chat.save_saathi_message(user["id"], conversation_id, text)
         if saved is None:     # the conversation was deleted while SAATHI was writing
             return
+        if as_they_write.active and letters.has_telugu(saved["content"]):
+            saved = {**saved, "content": letters.to_english_letters(saved["content"])}
         yield json.dumps({"message": saved}) + "\n"
+        chat.update_summary_in_background(user["id"], conversation_id)
 
     return StreamingResponse(lines(), media_type="application/x-ndjson")
 
