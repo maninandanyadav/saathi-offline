@@ -31,7 +31,9 @@ import unicodedata
 # Counting characters would quietly give a Telugu conversation far less room
 # than an English one. So SAATHI counts tokens instead, using the smallest
 # (most expensive) measured value for each script, so the guess is never low.
-TELUGU_PER_TOKEN = 2.7
+# Telugu is set below its measured 2.76 on purpose: at 2.7 a real sample came
+# out one token under, and an under-estimate is the dangerous direction.
+TELUGU_PER_TOKEN = 2.5
 DEVANAGARI_PER_TOKEN = 4.0
 OTHER_PER_TOKEN = 4.0          # plain English, and Telugu/Hindi in a-z letters
 PER_MESSAGE_COST = 5           # the "who said this" marks around every message

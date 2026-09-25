@@ -10,6 +10,7 @@ import logging
 
 import requests
 
+from backend import letters
 from backend.letters import (HINDI_IN_ENGLISH, TELUGU_IN_ENGLISH,
                             written_in_english_letters)
 
@@ -90,20 +91,44 @@ TELUGU_LETTERS = (0x0C00, 0x0C7F)
 DEVANAGARI_LETTERS = (0x0900, 0x097F)
 
 
-def uses_letters(text, letters):
-    first, last = letters
+def uses_letters(text, letter_range):
+    """Does this text contain any letter from that block of the alphabet?"""
+    first, last = letter_range
     return any(first <= ord(sign) <= last for sign in text)
 
 
-def which_letters(newest):
-    """Which letters should the answer use? Worked out from the person's own words."""
-    # A message may start with "[Replying to ...]", which is always written in
-    # English. That note is ours, not theirs, so it must not decide the language.
-    if newest.startswith("["):
-        closing = newest.find("]")
-        if closing != -1:
-            newest = newest[closing + 1:]
+def which_letters(newest, earlier=None):
+    """How should this reply be written? Worked out from the person's own words.
 
+    `earlier` is the messages BEFORE this one. A short message like "haa"
+    carries no evidence of its own, so the conversation decides - and
+    because those earlier messages never change, this note never changes
+    either, which is what keeps Ollama's memory of the conversation.
+    """
+    # A message may carry SEVERAL notes of ours in front of it: which message
+    # is being replied to (7E), and an older message brought back (7D). Every
+    # one of them has to come off before the language is judged.
+    #
+    # Stripping only the first was a real bug: a recalled Telugu message left
+    # the second note in place, and someone writing plain English was answered
+    # in Telugu script.
+    while newest.lstrip().startswith("["):
+        newest = newest.lstrip()
+        closing = newest.find("]")
+        if closing == -1:
+            break
+        newest = newest[closing + 1:]
+
+    return letters.instruction(letters.profile(newest, earlier))
+
+
+def old_which_letters(newest):
+    """The first-match version, kept only to show what 7.5C replaced.
+
+    It stopped at the first clue it found, so one word decided a whole
+    message: "Today college lo presentation undi" became pure Telugu because
+    of `undi`, and short messages like "bro" silently fell to English.
+    """
     if uses_letters(newest, TELUGU_LETTERS):
         return "[Answer in Telugu script.]"
     if uses_letters(newest, DEVANAGARI_LETTERS):
@@ -149,17 +174,30 @@ def mark_letters(messages):
     every reply slower than the last (9s, then 16s, then 18s).
     """
     marked = []
+    spoken_before = []
     for message in messages:
+        their_own_words = message["content"]      # before any note of ours
         if message.get("role") == "user":
+            # Judged against what came before it, never against what came
+            # after, so this message's note is the same on every future turn.
+            note = which_letters(their_own_words, spoken_before)
             message = dict(message)
             # In front of their words, not after them: a note left at the end
             # was sometimes copied into the reply.
-            message["content"] = which_letters(message["content"]) + "\n" + message["content"]
+            message["content"] = note + "\n" + their_own_words
+        # The history used for judging holds THEIR words, never our notes -
+        # our notes are written in English, and profiling them turned a Telugu
+        # conversation into an English one.
+        spoken_before.append({
+            "sender": "user" if message.get("role") == "user" else "saathi",
+            "content": their_own_words,
+        })
         marked.append(message)
     return marked
 
 
-NOTE_WORDS = ("answer in", "same letters", "script", "replying to", "a-z",
+NOTE_WORDS = ("answer in", "reply in", "reply the same", "they write", "same letters",
+              "script", "replying to", "a-z",
               "letters", "they are writing", "from earlier in this conversation")
 
 
@@ -328,7 +366,26 @@ def summarize(previous_summary, older_messages):
 
 
 def reply(messages, background=None):
-    """Ask the local AI and return SAATHI's whole reply at once."""
+    """Ask the local AI for a whole reply, and check it came back right.
+
+    If the reply is in the wrong language, it is asked for once more with only
+    the newest message. If that is wrong too, the first reply is kept: a reply
+    in the wrong language is still better than no reply at all.
+    """
+    text = one_reply(messages, background)
+    if came_back_right(messages, text):
+        return text
+
+    log.warning("The reply came back in the wrong language; asking again.")
+    for _ in range(ONE_MORE_TRY):
+        second = one_reply(just_the_newest(messages), background)
+        if came_back_right(messages, second):
+            return second
+    return text
+
+
+def one_reply(messages, background=None):
+    """One attempt: ask, read the answer, tidy it."""
     response = ask_ollama(messages, stream=False, background=background)
     try:
         text = response.json()["message"]["content"].strip()
@@ -370,7 +427,66 @@ def raw_pieces(messages, background=None):
         raise AIUnavailable(CANT_REACH)
 
 
+# How much of a reply is needed before its language is clear. A script shows
+# itself in the very first word, so almost nothing is held back. Telling
+# Hinglish from plain English needs real words, so that one waits longer.
+#
+# This matters for how streaming FEELS: holding 50 characters for every reply
+# made short ones arrive in a single lump instead of word by word.
+ENOUGH_FOR_SCRIPT = 12
+ENOUGH_FOR_WORDS = 50
+
+
+def enough_to_judge(messages):
+    """How many characters to wait for before judging this reply."""
+    wanted = letters.wanted_reply(letters.profile(their_own_words(messages)))
+    language, script = wanted
+    if script in ("telugu", "devanagari"):
+        return ENOUGH_FOR_SCRIPT
+    if language == "hindi":
+        return ENOUGH_FOR_WORDS        # Hinglish or English? that needs words
+    return ENOUGH_FOR_SCRIPT           # English: we are only watching for a script
+
+
 def stream_reply(messages, background=None):
+    """The reply as it is written, checked before any of it reaches the screen.
+
+    The first few dozen characters are held back, just long enough to see
+    which language they are in. If it is the wrong one, that attempt is
+    dropped - unseen - and asked for again with only the newest message.
+    Nothing appears and then disappears.
+    """
+    coming = clean_pieces(messages, background)
+    wait_for = enough_to_judge(messages)
+    held = ""
+    judged = False
+
+    for piece in coming:
+        if judged:
+            yield piece                       # already approved: straight through
+            continue
+
+        held += piece
+        if len(held.strip()) < wait_for:
+            continue                          # not enough yet to tell
+
+        judged = True
+        if came_back_right(messages, held):
+            yield held
+            continue
+
+        log.warning("The reply started in the wrong language; asking again.")
+        if hasattr(coming, "close"):
+            coming.close()                    # stop the model writing the wrong one
+        yield from clean_pieces(just_the_newest(messages), background)
+        return
+
+    if not judged and held:
+        # A reply that ended before there was enough to judge. Let it through.
+        yield held
+
+
+def clean_pieces(messages, background=None):
     """The reply, piece by piece, with any copied note taken off.
 
     Only a reply that actually starts with "[" is held back for a moment, so
@@ -417,3 +533,62 @@ def stream_reply(messages, background=None):
         ending = without_notes(tail)
         if ending:
             yield ending
+
+
+# ------------------------------------------------- asking again when it comes
+# back wrong (7.5F)
+#
+# The model sometimes answers in the conversation's language instead of the
+# person's. Measured: after two English turns, a Telugu message got an English
+# reply 0 times out of 3 in Telugu. The SAME message with the SAME note, but
+# with the conversation left out, came back in Telugu 3 times out of 3.
+#
+# So a wrong reply is asked for once more with only the newest message. That
+# trades knowing what was said before for answering in the right language -
+# a fair trade, and only when something has already gone wrong.
+
+ONE_MORE_TRY = 1      # never a loop: one repair, then take what we have
+
+
+def their_own_words(messages):
+    """The newest thing the person actually wrote, with our notes taken off."""
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            text = message["content"]
+            while text.lstrip().startswith("["):
+                text = text.lstrip()
+                closing = text.find("]")
+                if closing == -1:
+                    break
+                text = text[closing + 1:]
+            return text.strip()
+    return ""
+
+
+def came_back_right(messages, text):
+    """Is this reply in the language the person's newest message asked for?"""
+    return letters.reply_matches(letters.profile(their_own_words(messages)), text)
+
+
+LAST_EXCHANGE = 3         # their previous message, our answer, and the new one
+
+
+def just_the_newest(messages):
+    """What to send on a second attempt - and it depends on the message.
+
+    A message clearly in its own language does better ALONE: the conversation
+    is exactly what dragged the reply into the wrong language. Measured on
+    "Ela unnav bro?" after two English turns - 0 of 3 with the conversation,
+    3 of 3 without it.
+
+    A short message like "bro" or "haa" is the opposite. It has no language of
+    its own and borrowed one from the conversation, so taking the conversation
+    away takes away the only evidence there was. Measured on "bro" after a
+    Telugu message - 0 of 3 alone, 3 of 3 with the last exchange kept.
+    """
+    newest = [message for message in reversed(messages) if message.get("role") == "user"][:1]
+    if not newest:
+        return messages
+
+    barely_anything = letters.profile(their_own_words(messages))["confidence"] == "low"
+    return messages[-LAST_EXCHANGE:] if barely_anything else newest

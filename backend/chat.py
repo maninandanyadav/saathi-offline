@@ -459,11 +459,33 @@ def gather_from_database(connection, conversation, limit=CONTEXT_MESSAGES):
 def prepare_reply(user_id, conversation_id):
     """Everything that happens BEFORE SAATHI speaks.
 
-    Two clear halves:
-      1. here - check the conversation is theirs, and read it from the database
-      2. context.build() - decide what the AI is actually told
+    THE WHOLE JOURNEY OF ONE MESSAGE, and where each part lives:
 
-    Returns those messages, or None if the conversation isn't theirs.
+      you type a message
+        -> main.py            saves it, after checking you are logged in
+        -> owned_conversation is this conversation yours? (the only lock)
+        -> gather_from_database
+              the messages since the summary leaves off,
+              the one message you are replying to, fetched in full,
+              the older messages, for searching but not for sending,
+              the summary of the older part
+        -> context.build      decides what the AI is actually told:
+              to_ai_messages      who said what, in order, inside the budget
+              find_relevant       an older message that matches your words
+              with_recalled       ...attached to your newest message
+              with_reply_context  ...and which message you are answering
+        -> ai.reply           adds SAATHI's personality and the summary,
+              mark_letters        tells it which letters to answer in,
+              and asks the model on 127.0.0.1
+        -> letters            shows Telugu in the letters you write in
+        -> main.py            sends it to your screen, saves it, and starts
+                              the summary in the background if it is due
+
+    Only the last four steps involve the AI at all. Everything before them is
+    ordinary Python deciding what is worth saying - which is why it can be
+    read, tested and trusted without running a model.
+
+    Returns that plan, or None if the conversation isn't theirs.
     """
     with get_connection() as connection:
         conversation = owned_conversation(connection, user_id, conversation_id)

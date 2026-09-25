@@ -19,6 +19,7 @@ import re
 import shutil
 import sys
 import tempfile
+import unicodedata
 import uuid
 import threading
 import time
@@ -58,6 +59,16 @@ def check(label, passed, detail=""):
 
 
 # ---------------------------------------------------------------- helpers
+
+
+def unicodedata_name_exists(code):
+    """Is this number actually a letter, rather than an empty slot?"""
+    try:
+        unicodedata.name(chr(code))
+        return True
+    except ValueError:
+        return False
+
 
 def new_user(name):
     """Create an account and return a session that's logged in as it."""
@@ -628,14 +639,14 @@ def run_checks():
 
     section("TELUGU IN THE LETTERS YOU WRITE IN")
     check("Telugu script becomes a-z letters",
-          letters.to_english_letters("చాలా బాధగా ఉంది") == "chala badhaga undi",
+          letters.to_english_letters("చాలా బాధగా ఉంది") == "Chala badhaga undi",
           letters.to_english_letters("చాలా బాధగా ఉంది"))
     check("The dot is n before most sounds, m at the end of a word",
-          letters.to_english_letters("ఉంది") == "undi"
-          and letters.to_english_letters("సిద్ధం") == "siddham",
+          letters.to_english_letters("ఉంది") == "Undi"
+          and letters.to_english_letters("సిద్ధం") == "Siddham",
           letters.to_english_letters("ఉంది") + " / " + letters.to_english_letters("సిద్ధం"))
     check("English inside a Telugu sentence is left alone",
-          "exam" in letters.to_english_letters("exam గురించి"))
+          "exam" in letters.to_english_letters("exam గురించి").lower())
     check("A message with no Telugu is untouched",
           letters.to_english_letters("I am fine, thanks.") == "I am fine, thanks.")
 
@@ -651,7 +662,7 @@ def run_checks():
     check("Someone who types in a-z letters is shown a-z letters",
           letters.person_writes_in_english(typed_in_english))
     check("...and SAATHI's Telugu is converted for them",
-          chat.shown_as_they_write(typed_in_english)[1]["content"] == "nenu bagunnanu.",
+          chat.shown_as_they_write(typed_in_english)[1]["content"] == "Nenu bagunnanu.",
           chat.shown_as_they_write(typed_in_english)[1]["content"])
     check("...while their own words are never touched",
           chat.shown_as_they_write(typed_in_english)[0]["content"] == "Ela unnavu?")
@@ -664,10 +675,310 @@ def run_checks():
     streamed = letters.AsTheyWrite(True)
     out = "".join(streamed.feed(piece) for piece in ["చా", "లా బాధ", "గా ఉం", "ది."]) + streamed.finish()
     check("Streaming converts whole words, even when pieces split them",
-          out == "chala badhaga undi.", out)
+          out == "Chala badhaga undi.", out)
     untouched = letters.AsTheyWrite(False)
     check("...and an English reply streams through unchanged",
           "".join(untouched.feed(p) for p in ["That ", "sounds ", "hard."]) == "That sounds hard.")
+
+    section("REPLYING TO A MESSAGE, THROUGH THE WHOLE PIPELINE (7E)")
+    reply_chat = chat.create_conversation(user_a_id)["id"]
+    chat.add_user_message(user_a_id, reply_chat, "I have too much to do for my project.")
+    advice = chat.save_saathi_message(user_a_id, reply_chat,
+                                      "You could try breaking the project into smaller tasks.")
+    chat.add_user_message(user_a_id, reply_chat, "What day is it today?")
+    chat.save_saathi_message(user_a_id, reply_chat, "I don't keep track of days.")
+    chat.add_user_message(user_a_id, reply_chat, "How should I do that?",
+                          reply_to_message_id=advice["id"])
+
+    replied = chat.prepare_reply(user_a_id, reply_chat)
+    newest_now = replied["messages"][-1]["content"]
+    check("The message being answered is quoted, even with newer messages after it",
+          "breaking the project into smaller tasks" in newest_now)
+    check("...and the person's own new words come after the note",
+          newest_now.rstrip().endswith("How should I do that?"))
+    check("...while the messages before it stay clean",
+          all("Replying to" not in m["content"] for m in replied["messages"][:-1]))
+
+    # one far outside the window, which the recent messages could never carry
+    far_chat = chat.create_conversation(user_a_id)["id"]
+    far_back = chat.add_user_message(user_a_id, far_chat,
+                                     "The spare key is under the blue pot, PLUMWOOD-4.")
+    for number in range(30):
+        chat.add_user_message(user_a_id, far_chat, f"Day {number}: an ordinary day.")
+        chat.save_saathi_message(user_a_id, far_chat, f"Thanks for telling me, day {number}.")
+    chat.add_user_message(user_a_id, far_chat, "What was this again?",
+                          reply_to_message_id=far_back["id"])
+    far_plan = chat.prepare_reply(user_a_id, far_chat)
+    check("A message far outside the window is still quoted in full",
+          "PLUMWOOD-4" in far_plan["messages"][-1]["content"])
+
+    # the original deleted AFTER the reply was written
+    chat.delete_message(user_a_id, far_chat, far_back["id"])
+    gone_plan = chat.prepare_reply(user_a_id, far_chat)
+    check("Once the original is deleted, the note says so",
+          "it was deleted" in gone_plan["messages"][-1]["content"])
+    check("...and its words are nowhere in what the AI is told",
+          all("PLUMWOOD" not in m["content"] for m in gone_plan["messages"]))
+    check("...not in the notes either",
+          "PLUMWOOD" not in (gone_plan["background"] or ""))
+    check("...and not in anything brought back",
+          all("PLUMWOOD" not in m["content"] for m in gone_plan["recalled"]))
+    check("A new reply to a deleted message is refused outright",
+          send(a, far_chat, "and this?", reply_to=far_back["id"]).status_code == 400)
+
+    section("OUR NOTES NEVER DECIDE THE LANGUAGE")
+    plain_english = [{"role": "user", "content": "Where should I start?"}]
+    with_both = context.with_reply_context(
+        context.with_recalled(plain_english,
+                              [{"id": 1, "sender": "user", "content": "ఈ రోజు అలసటగా ఉంది"}]),
+        {"available": True, "sender": "saathi", "content": "Try breaking it up."})
+    check("An English message with a Telugu message recalled stays English",
+          "Telugu script" not in ai.which_letters(with_both[-1]["content"]),
+          ai.which_letters(with_both[-1]["content"])[:50])
+
+    telugu_person = [{"role": "user", "content": "ఇప్పుడు ఏం చేయాలి?"}]
+    telugu_both = context.with_reply_context(
+        context.with_recalled(telugu_person,
+                              [{"id": 1, "sender": "user", "content": "I finished two chapters"}]),
+        {"available": True, "sender": "saathi", "content": "Take a break."})
+    check("A Telugu message with an English message recalled stays Telugu",
+          "in Telugu" in ai.which_letters(telugu_both[-1]["content"]),
+          ai.which_letters(telugu_both[-1]["content"])[:50])
+
+    section("LANGUAGE AND STYLE PROFILE (7.5B)")
+    for message, wanted in [
+        ("How are you?", "English"),
+        ("ఎలా ఉన్నావు?", "Telugu"),
+        ("Ela unnav?", "Telugu in English letters"),
+        ("कैसे हो?", "Hindi"),
+        ("Kaise ho?", "Hinglish"),
+        ("Bro ela unnav?", "Telugu-English mix"),
+        ("Bro kal exam hai", "Hindi-English mix"),
+        ("Today college lo presentation undi", "English-Telugu mix"),
+        ("Naku today chala work undi", "Telugu-English mix"),
+    ]:
+        found = letters.profile(message)
+        check(f"{message[:30]:<32} -> {wanted}", found["style"] == wanted, found["style"])
+
+    mixed = letters.profile("Today college lo presentation undi")
+    check("A mixed message names BOTH languages",
+          mixed["mixed"] and mixed["language"] == "english" and mixed["with"] == "telugu")
+    check("...and shows which words voted",
+          "lo" in mixed["votes"]["telugu"] and "college" in mixed["votes"]["english"])
+    check("One borrowed word does not flip the whole message",
+          letters.profile("I have an exam kal")["language"] == "english")
+
+    check("A native script is trusted on its own",
+          letters.profile("ఈ రోజు")["confidence"] == "high"
+          and letters.profile("ఈ రోజు")["script"] == "telugu")
+    check("A short message admits it is unsure",
+          letters.profile("bro")["confidence"] == "low")
+
+    telugu_chat = [{"sender": "user", "content": "Ela unnav bro?"},
+                   {"sender": "saathi", "content": "Nenu bagunnanu."},
+                   {"sender": "user", "content": "Repu exam undi, konchem tension ga undi."}]
+    borrowed = letters.profile("haa", telugu_chat)
+    check("A short message borrows the conversation's language",
+          borrowed["language"] == "telugu" and borrowed["from_earlier"])
+    check("...and says it borrowed rather than pretending to be sure",
+          borrowed["confidence"] == "low")
+
+    english_chat = [{"sender": "user", "content": "I had a long day at college today."}]
+    check("An English conversation is never dragged elsewhere",
+          letters.profile("okay", english_chat)["language"] == "english")
+    check("A clear message ignores the conversation, so switching still works",
+          letters.profile("I am feeling better now, thanks.", telugu_chat)["language"] == "english")
+    check("SAATHI's own replies never vote on the person's language",
+          letters.from_recent([{"sender": "saathi", "content": "ఈ రోజు ఎలా ఉంది?"}]) is None)
+
+    check("Words shared by two languages decide nothing",
+          "ki" in letters.SHARED and "to" in letters.SHARED)
+
+    section("THE INSTRUCTION GIVEN TO THE MODEL (7.5C)")
+    def note_for(message, earlier=None):
+        return letters.instruction(letters.profile(message, earlier))
+
+    check("English asks for English", note_for("How was your day?") == "[Reply in English.]")
+    check("Telugu script asks for Telugu script",
+          "Telugu script" in note_for("ఈ రోజు ఎలా ఉంది?"))
+    check("Telugu in a-z ALSO asks for Telugu script (the letters are changed after)",
+          "Telugu script" in note_for("Eeroju ela undi?"))
+    check("Hindi script asks for Devanagari", "Devanagari" in note_for("आज दिन कैसा था?"))
+    check("Hinglish asks for a-z letters, not Devanagari",
+          "a-z letters" in note_for("Aaj din kaisa tha?")
+          and "Never use Devanagari" in note_for("Aaj din kaisa tha?"))
+    check("A Telugu-led mix asks to keep their English words",
+          "Keep the English words" in note_for("Naku today chala work undi"))
+    check("An English-led mix asks to keep their Telugu words, in a-z letters",
+          "mixed together" in note_for("Today college lo presentation undi")
+          and "Never use Telugu script" in note_for("Today college lo presentation undi"))
+    check("A Hindi-led mix keeps the mix too",
+          "mixed style" in note_for("Bro kal exam hai"))
+    check("Every instruction is short enough for a small model",
+          all(len(note_for(m)) < 400 for m in
+              ["How was your day?", "ఈ రోజు ఎలా ఉంది?", "Eeroju ela undi?", "आज दिन कैसा था?",
+               "Aaj din kaisa tha?", "Today college lo presentation undi", "Bro kal exam hai"]))
+
+    telugu_talk = [{"sender": "user", "content": "Ela unnav bro?"},
+                   {"sender": "saathi", "content": "Nenu bagunnanu."}]
+    check("A short message inherits the conversation's instruction",
+          "Telugu" in note_for("haa", telugu_talk))
+    marked_twice = ai.mark_letters([{"role": "user", "content": "Ela unnav?"},
+                                    {"role": "assistant", "content": "Bagunnanu."},
+                                    {"role": "user", "content": "haa"}])
+    check("A message's instruction never changes on later turns",
+          marked_twice[2]["content"] == ai.mark_letters(
+              [{"role": "user", "content": "Ela unnav?"},
+               {"role": "assistant", "content": "Bagunnanu."},
+               {"role": "user", "content": "haa"},
+               {"role": "assistant", "content": "Cheppu."},
+               {"role": "user", "content": "more"}])[2]["content"])
+    check("Our English notes never vote on the person's language",
+          "Telugu" in ai.mark_letters(
+              [{"role": "user", "content": "Ela unnav?"},
+               {"role": "assistant", "content": "Bagunnanu."},
+               {"role": "user", "content": "haa"}])[2]["content"])
+    check("SAATHI's own replies are never marked",
+          not ai.mark_letters([{"role": "assistant", "content": "hello"}])[0]["content"].startswith("["))
+
+    section("ROMAN TELUGU QUALITY (7.5D)")
+    check("Your own examples come out naturally",
+          letters.to_english_letters("ఎలా ఉన్నావు") == "Ela unnavu"
+          and letters.to_english_letters("నువ్వు బాగున్నావా") == "Nuvvu bagunnava",
+          letters.to_english_letters("ఎలా ఉన్నావు"))
+    check("English words in a mixed reply are NOT touched",
+          letters.to_english_letters("చాలా good undi") == "Chala good undi",
+          letters.to_english_letters("చాలా good undi"))
+    check("...not even long ones that look like Telugu vowels",
+          letters.to_english_letters("school book too cool") == "School book too cool",
+          letters.to_english_letters("school book too cool"))
+    check("Rare letters no longer pass through as script",
+          not letters.has_telugu(letters.to_english_letters("నాౠకు")),
+          letters.to_english_letters("నాౠకు"))
+    check("Telugu digits become ordinary digits",
+          letters.to_english_letters("౫") == "5", letters.to_english_letters("౫"))
+    check("Sentences start with a capital",
+          letters.to_english_letters("ఈ రోజు ఎలా ఉంది? నేను బాగున్నాను.")
+          == "Ee roju ela undi? Nenu bagunnanu.",
+          letters.to_english_letters("ఈ రోజు ఎలా ఉంది? నేను బాగున్నాను."))
+    check("Nothing Telugu survives a whole real reply",
+          not letters.has_telugu(letters.to_english_letters(
+              "మీరు చాలా అలసిపోయినట్లు వినడానికి నాకు చాలా బాధగా ఉంది.")))
+    # only the slots Unicode actually gives a letter to - the block has gaps
+    everyday = [chr(c) for c in list(range(0x0C05, 0x0C3A))
+                + list(range(0x0C3E, 0x0C57)) + list(range(0x0C66, 0x0C70))
+                if unicodedata_name_exists(c)]
+    unconverted = [sign for sign in everyday
+                   if letters.has_telugu(letters.to_english_letters(sign))]
+    check("Every everyday Telugu letter, mark and digit is known",
+          not unconverted, "".join(unconverted[:10]))
+
+    section("CODE-SWITCHING ACROSS A CONVERSATION (7.5E)")
+    def styles_through(messages):
+        """The style found for each message, judged against the ones before it."""
+        so_far, found = [], []
+        for text in messages:
+            found.append(letters.profile(text, list(so_far))["style"])
+            so_far.append({"sender": "user", "content": text})
+            so_far.append({"sender": "saathi", "content": "..."})
+        return found
+
+    switching = styles_through(["Ela unnav?",
+                                "I'm good bro, today I have a presentation.",
+                                "Actually konchem tension ga undi."])
+    check("Roman Telugu, then English, then back to Telugu",
+          switching[0].startswith("Telugu") and switching[1] == "English"
+          and switching[2].startswith("Telugu"), switching)
+
+    across = styles_through(["Hi, how are you?", "Ela unnav bro?", "Aaj bahut thak gaya hoon",
+                             "Today college lo presentation undi", "I will sleep early tonight."])
+    check("Every switch in a five-message conversation is seen",
+          across[0] == "English" and across[1].startswith("Telugu")
+          and across[2] == "Hinglish" and across[3] == "English-Telugu mix"
+          and across[4] == "English", across)
+
+    check("A mixed message is never flattened to one language",
+          all(letters.profile(m)["mixed"] for m in
+              ["Today college lo presentation undi",
+               "Bro kal exam hai, preparation complete nahi hua",
+               "Naku today chala work undi"]))
+    check("...and each names the right pair",
+          letters.profile("Bro kal exam hai, preparation complete nahi hua")["with"] == "english"
+          and letters.profile("Naku today chala work undi")["language"] == "telugu")
+
+    check("An English word inside Telugu does not make the message English",
+          letters.profile("Naku today chala work undi")["language"] == "telugu")
+    check("A Telugu word inside English does not make the message Telugu",
+          letters.profile("I have a presentation kal, thoda tension")["language"] != "telugu")
+
+    section("CHECKING THE REPLY CAME BACK RIGHT (7.5F)")
+    for message, answer, wanted, why in [
+        ("Ela unnav?", "నేను బాగున్నాను.", True, "Telugu asked, Telugu given"),
+        ("Ela unnav?", "I am doing well, thank you.", False, "Telugu asked, English given"),
+        ("Kaise ho?", "Arre, main theek hoon yaar.", True, "Hinglish asked, Hinglish given"),
+        ("Kaise ho?", "I am fine, thank you.", False, "Hinglish asked, English given"),
+        ("आज कैसा था?", "यह अच्छा था।", True, "Devanagari asked and given"),
+        ("How are you?", "I am well, thanks.", True, "English asked and given"),
+        ("How are you?", "నేను బాగున్నాను.", False, "English asked, Telugu given"),
+        ("Today college lo presentation undi",
+         "That sounds stressful, chala tension.", True, "a mix keeps its English"),
+    ]:
+        check(why, letters.reply_matches(letters.profile(message), answer) == wanted)
+
+    check("An empty reply is never called wrong",
+          letters.reply_matches(letters.profile("Ela unnav?"), "   "))
+
+    marked = [{"role": "user", "content": "[Reply in English.]\nHi"},
+              {"role": "assistant", "content": "Hello."},
+              {"role": "user",
+               "content": "[Reply in Telugu, written in Telugu script.]\nEla unnav bro?"}]
+    check("Our notes are stripped before judging the language",
+          ai.their_own_words(marked) == "Ela unnav bro?", ai.their_own_words(marked))
+    check("A clear message is asked again with only itself",
+          len(ai.just_the_newest(marked)) == 1)
+    telugu_note = "[Reply in Telugu, written in Telugu script.]\n"
+    barely = [{"role": "user", "content": telugu_note + "Ela unnav?"},
+              {"role": "assistant", "content": "నేను బాగున్నాను."},
+              {"role": "user", "content": telugu_note + "bro"}]
+    check("...but a short one keeps the last exchange, which is its only evidence",
+          len(ai.just_the_newest(barely)) == 3, len(ai.just_the_newest(barely)))
+    check("A wrong reply is spotted, a right one is not",
+          not ai.came_back_right(marked, "I am fine, thanks.")
+          and ai.came_back_right(marked, "నేను బాగున్నాను."))
+
+    kept_pieces = ai.clean_pieces
+    try:
+        tries = []
+
+        def wrong_then_right(messages, background=None):
+            tries.append(len(messages))
+            if len(tries) == 1:
+                return iter(["I am doing well today, thank you for asking. How are you?"])
+            return iter(["నేను బాగున్నాను. ", "నువ్వు ఎలా ఉన్నావు?"])
+
+        ai.clean_pieces = wrong_then_right
+        shown = "".join(ai.stream_reply(marked))
+        check("A reply starting in the wrong language never reaches the screen",
+              "I am doing well" not in shown, shown[:40])
+        check("...and the second attempt is the one shown",
+              "బాగున్నాను" in shown)
+        check("...asked for with only the newest message", tries == [3, 1], tries)
+
+        always_wrong = []
+
+        def never_right(messages, background=None):
+            always_wrong.append(len(messages))
+            return iter(["I am doing well today, thank you for asking. How are you?"])
+
+        ai.clean_pieces = never_right
+        "".join(ai.stream_reply(marked))
+        check("It never loops: two attempts at most", len(always_wrong) == 2, always_wrong)
+
+        ai.clean_pieces = lambda m, b=None: iter(["Sare."])
+        check("A reply too short to judge is let through",
+              "".join(ai.stream_reply(marked)) == "Sare.")
+    finally:
+        ai.clean_pieces = kept_pieces
 
     section("LOGOUT")
     copied_token = a.cookies.get("saathi_session")

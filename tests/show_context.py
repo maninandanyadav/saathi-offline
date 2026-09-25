@@ -67,6 +67,24 @@ def show_context(user, conversation_id):
     print(f"Conversation {conversation['id']}: {conversation['title'] or '(no name yet)'}")
     print(f"Owner: {user['saathi_id']}")
     print(LINE)
+    print("EACH STAGE, AND WHAT IT DID")
+    print(LINE)
+    stages = [
+        ("1. is this conversation yours?", "yes - checked before anything was read"),
+        ("2. messages since the summary", f"{len(gathered['recent_messages'])} read from the database"),
+        ("3. older messages, searchable", f"{len(gathered['older_messages'])} kept back for searching"),
+        ("4. the summary of the older part",
+         "written" if gathered["summary"] else "not needed yet"),
+        ("5. an older message brought back",
+         f"{len(plan['recalled'])} matched your newest message"),
+        ("6. the message you are replying to",
+         "quoted" if gathered["replying_to"] else "not a reply"),
+        ("7. what the AI is finally told", f"{len(messages)} messages"),
+    ]
+    for stage, what in stages:
+        print(f"  {stage:<40} {what}")
+
+    print(LINE)
     print(f"  {'messages in this conversation altogether':<44} {total}")
     for label, value in context.describe(gathered["recent_messages"], messages,
                                          plan["background"]).items():
