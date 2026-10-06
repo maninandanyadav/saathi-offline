@@ -23,6 +23,7 @@
       </div>
       <div class="account">
         <span id="whoami" class="whoami"></span>
+        <button id="open-memory" class="text-button" type="button">Memory</button>
         <button id="logout" class="text-button" type="button">Log out</button>
       </div>
     </header>
@@ -54,6 +55,24 @@
           <h2>Someone to talk to.</h2>
           <p>Start a new conversation, or pick one from the list.</p>
         </div>
+
+        <!-- Everything SAATHI remembers about you, in plain sight. -->
+        <section id="memory-view" class="memory-view" hidden aria-labelledby="memory-heading">
+          <header class="chat-header">
+            <button id="memory-back" class="back-button" type="button" aria-label="Back">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5 L8 12 L15 19"/></svg>
+            </button>
+            <h2 id="memory-heading">What Saathi remembers</h2>
+          </header>
+          <div class="memory-body">
+            <p class="memory-intro">
+              These few things are kept between conversations. Everything else
+              you say stays inside the conversation you said it in.
+            </p>
+            <p id="memory-note" class="memory-note" hidden></p>
+            <ul id="memory-list" class="memory-list"></ul>
+          </div>
+        </section>
 
         <section id="conversation-view" class="conversation-view" hidden>
           <header class="chat-header">

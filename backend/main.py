@@ -335,6 +335,19 @@ def remember(request: RememberRequest, user=Depends(require_user)):
         raise HTTPException(status_code=400, detail=str(error))
 
 
+@app.delete("/api/memories/{memory_id}", status_code=204)
+def forget(memory_id: int, user=Depends(require_user)):
+    """Forget one thing about the logged-in person.
+
+    A memory that isn't theirs answers 404 - the same answer as one that
+    never existed, so nobody can learn which memory numbers are in use by
+    trying them.
+    """
+    if not memory.delete_memory(user["id"], memory_id):
+        raise HTTPException(status_code=404, detail="Memory not found.")
+    return Response(status_code=204)   # 204: done, and nothing to send back
+
+
 # ---------------------------------------------------------------- message actions
 
 @app.put("/api/conversations/{conversation_id}/messages/{message_id}/saved")

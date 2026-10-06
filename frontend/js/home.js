@@ -854,3 +854,108 @@ window.addEventListener("hashchange", openFromAddress);
 
 // After a refresh, reopen the conversation named in the address.
 loadConversations().then(openFromAddress);
+
+// ---------------------------------------------- the Memory Center (Step 8F)
+//
+// A plain list of the few things SAATHI keeps between conversations. It opens
+// in the same place a conversation does, so nothing about the rest of the
+// screen changes.
+
+const memoryView = document.getElementById("memory-view");
+const memoryList = document.getElementById("memory-list");
+const memoryNote = document.getElementById("memory-note");
+
+function showMemoryNote(text, bad = false) {
+  memoryNote.textContent = text;
+  memoryNote.hidden = !text;
+  memoryNote.classList.toggle("bad", bad);
+}
+
+async function openMemory() {
+  closeConversation();                 // leave any open chat, as Back would
+  noSelection.hidden = true;
+  memoryView.hidden = false;
+  layout.classList.add("show-chat");   // phones: show this instead of the list
+  memoryList.replaceChildren();
+  showMemoryNote("Loading…");
+
+  try {
+    renderMemories(await api("/api/memories"));
+  } catch (error) {
+    showMemoryNote("Couldn't load what Saathi remembers.", true);
+  }
+}
+
+function closeMemory() {
+  memoryView.hidden = true;
+  noSelection.hidden = false;
+  layout.classList.remove("show-chat");
+}
+
+function renderMemories(memories) {
+  memoryList.replaceChildren();
+
+  if (!memories.length) {
+    showMemoryNote("Saathi doesn't remember anything about you yet.");
+    return;
+  }
+  showMemoryNote("");
+
+  for (const memory of memories) {
+    const item = document.createElement("li");
+    item.className = "memory-item";
+
+    const fact = document.createElement("p");
+    fact.className = "memory-fact";
+    // textContent, never innerHTML: a memory is text, and must never be
+    // treated as something the browser should run.
+    fact.textContent = memory.fact;
+
+    const since = document.createElement("span");
+    since.className = "memory-since";
+    since.textContent = `remembered since ${formatListTime(memory.created_at)}`;
+    fact.append(since);
+
+    const actions = document.createElement("div");
+    actions.className = "memory-actions";
+    actions.append(memoryButton("Delete", () => askToForget(actions, memory), "danger"));
+
+    item.append(fact, actions);
+    memoryList.append(item);
+  }
+}
+
+function memoryButton(label, whenClicked, extra) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "text-button";
+  if (extra) button.classList.add(extra);
+  button.textContent = label;
+  button.addEventListener("click", whenClicked);
+  return button;
+}
+
+// Forgetting cannot be undone, so ask first - right there on the card.
+function askToForget(actions, memory) {
+  const question = document.createElement("span");
+  question.className = "confirm-text";
+  question.textContent = "Forget this?";
+  const yes = memoryButton("Forget", () => forgetMemory(memory.id), "danger");
+  const no = memoryButton("Cancel", () => {
+    actions.replaceChildren(
+      memoryButton("Delete", () => askToForget(actions, memory), "danger"));
+  });
+  actions.replaceChildren(question, yes, no);
+}
+
+async function forgetMemory(id) {
+  try {
+    await api(`/api/memories/${id}`, { method: "DELETE" });
+    renderMemories(await api("/api/memories"));   // read it back, never guess
+  } catch (error) {
+    showMemoryNote("Couldn't forget that. Please try again.", true);
+  }
+}
+
+document.getElementById("open-memory").addEventListener("click", openMemory);
+document.getElementById("memory-back").addEventListener("click", closeMemory);

@@ -1126,8 +1126,12 @@ def run_checks():
         leaked = answer.status_code == 200 and any(
             m["fact"] == "The user likes cricket." for m in answer.json())
         check(f"Cannot reach someone else's memories with {how}", not leaked)
-    check("There is no route that takes a memory owner's id at all",
-          a.get(f"{BASE}/api/memories/{other_id}").status_code == 404)
+    # Since 8G there IS a path with an id on it - but only for deleting.
+    # Asking it for memories is refused, and hands back no data either way.
+    by_path = a.get(f"{BASE}/api/memories/{other_id}")
+    check("No memories can be fetched by putting an id in the path",
+          by_path.status_code in (404, 405)
+          and "cricket" not in by_path.text, by_path.status_code)
     check("Not logged in -> refused",
           anyone.get(f"{BASE}/api/memories").status_code == 401)
 
@@ -1231,6 +1235,82 @@ def run_checks():
             "SELECT fact FROM memories WHERE id = ?", (first["id"],)).fetchone()["fact"]
     check("...and the real memory is unchanged",
           "Planted" not in untouched, untouched)
+
+    section("THE MEMORY CENTRE (8F)")
+    page = a.get(f"{BASE}/static/home.html").text
+    check("There is a Memory button in the top bar", 'id="open-memory"' in page)
+    check("...and a panel for it, hidden until asked for",
+          'id="memory-view"' in page and 'class="memory-view" hidden' in page)
+    check("...with a list and a place for messages",
+          'id="memory-list"' in page and 'id="memory-note"' in page)
+    check("...and a way back out", 'id="memory-back"' in page)
+    check("The panel says plainly what is kept and what is not",
+          "kept between conversations" in page and "stays inside the conversation" in page)
+
+    screen = a.get(f"{BASE}/static/js/home.js").text
+    check("It reads the memories through the same guarded route",
+          'api("/api/memories")' in screen)
+    # Looks for innerHTML being USED, not merely mentioned: the code's own
+    # comment says "textContent, never innerHTML", and a word search called
+    # that a bug.
+    memory_code = screen.split("the Memory Center")[1]
+    uses_innerhtml = re.search(r"innerHTML\s*(=|\+=)", memory_code)
+    check("A memory is put on screen as TEXT, never as html",
+          "fact.textContent = memory.fact" in screen and not uses_innerhtml,
+          uses_innerhtml.group(0) if uses_innerhtml else "")
+    check("An empty account is told so, rather than shown an empty box",
+          "doesn't remember anything about you yet" in screen)
+
+    styles = a.get(f"{BASE}/static/css/chat.css").text
+    check("The panel is styled from the existing palette, with nothing new invented",
+          ".memory-item" in styles and "var(--surface)" in styles and "var(--line)" in styles)
+    check("A long unbroken word cannot stretch the panel",
+          "overflow-wrap: anywhere" in styles.split(".memory-fact")[1][:200])
+
+    section("FORGETTING A MEMORY (8G)")
+    doomed = a.post(f"{BASE}/api/memories", json={"fact": "The user once owned a red bicycle."}).json()
+    theirs_now = b.post(f"{BASE}/api/memories", json={"fact": "The user has a dog named Rex."}).json()
+
+    check("Someone else's memory cannot be deleted, and is not even admitted to exist",
+          a.delete(f"{BASE}/api/memories/{theirs_now['id']}").status_code == 404)
+    check("...and it is still there afterwards",
+          any(m["fact"].startswith("The user has a dog")
+              for m in b.get(f"{BASE}/api/memories").json()))
+    check("A memory that never existed answers the same way",
+          a.delete(f"{BASE}/api/memories/999999").status_code == 404)
+    check("Not logged in -> refused",
+          anyone.delete(f"{BASE}/api/memories/{doomed['id']}").status_code == 401)
+    check("...so it survives that too",
+          any(m["id"] == doomed["id"] for m in a.get(f"{BASE}/api/memories").json()))
+
+    gone = a.delete(f"{BASE}/api/memories/{doomed['id']}")
+    check("Your own memory is forgotten", gone.status_code == 204, gone.status_code)
+    check("...and is no longer handed back to you",
+          not any(m["id"] == doomed["id"] for m in a.get(f"{BASE}/api/memories").json()))
+    check("Forgetting it twice is simply not found",
+          a.delete(f"{BASE}/api/memories/{doomed['id']}").status_code == 404)
+    check("...and its words are scrubbed from the database file itself",
+          not file_contains("red bicycle"))
+
+    with get_connection() as connection:
+        owner = connection.execute(
+            "SELECT id FROM users WHERE saathi_id = 'user_a'").fetchone()["id"]
+    before_ai = memory.save_memory(owner, "The user drives a blue van.")
+    talk = chat.create_conversation(owner)["id"]
+    chat.add_user_message(owner, talk, "What do I drive?")
+    check("A memory reaches the AI while it exists",
+          "blue van" in chat.prepare_reply(owner, talk)["messages"][-1]["content"])
+    memory.delete_memory(owner, before_ai["id"])
+    after_talk = chat.create_conversation(owner)["id"]
+    chat.add_user_message(owner, after_talk, "What do I drive?")
+    check("...and stops reaching it the moment it is forgotten",
+          "blue van" not in chat.prepare_reply(owner, after_talk)["messages"][-1]["content"])
+
+    screen = a.get(f"{BASE}/static/js/home.js").text
+    check("The screen asks before forgetting anything",
+          "Forget this?" in screen and "askToForget" in screen)
+    check("...and reads the list back from the server rather than guessing",
+          "renderMemories(await api(\"/api/memories\"))" in screen)
 
     section("LOGOUT")
     copied_token = a.cookies.get("saathi_session")

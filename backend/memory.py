@@ -184,6 +184,27 @@ def list_memories(user_id):
     return [memory_to_dict(row) for row in rows]
 
 
+def delete_memory(user_id, memory_id):
+    """Forget one thing, for good. False if it isn't this person's.
+
+    The owner check is part of the DELETE itself, exactly as it is for a
+    conversation: a row whose user_id does not match simply is not matched,
+    so changing the id in a request reaches nothing. There is no separate
+    "check, then delete" that could be got between.
+
+    PRAGMA secure_delete is on for every connection, so the words are
+    scrubbed from the database file rather than just unlinked.
+    """
+    with get_connection() as connection:
+        gone = connection.execute(
+            "DELETE FROM memories WHERE id = ? AND user_id = ?",
+            (memory_id, user_id),
+        ).rowcount
+    if gone:
+        log.info("Forgot memory %s for user %s.", memory_id, user_id)
+    return gone == 1
+
+
 def save_memory(user_id, fact):
     """Remember one fact for this person. Returns the memory.
 
