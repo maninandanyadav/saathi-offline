@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from backend import ai, auth, chat, database, letters
+from backend import ai, auth, chat, database, letters, memory
 
 # Worked out from this file's location, so it never depends on which
 # folder you started the server from.
@@ -76,6 +76,12 @@ class SaveRequest(BaseModel):
 
 class RenameRequest(BaseModel):
     title: str
+
+
+class RememberRequest(BaseModel):
+    """Only the fact. Notice there is no user id here on purpose - the
+    browser never says who it is, so it cannot claim to be somebody else."""
+    fact: str
 
 
 # ---------------------------------------------------------------- pages
@@ -299,6 +305,34 @@ def delete_conversation(conversation_id: int, user=Depends(require_user)):
     if not chat.delete_conversation(user["id"], conversation_id):
         raise HTTPException(status_code=404, detail="Conversation not found.")
     return Response(status_code=204)   # 204: done, and nothing to send back
+
+
+# ---------------------------------------------------------------- memory (Step 8)
+
+@app.get("/api/memories")
+def get_memories(user=Depends(require_user)):
+    """Everything SAATHI remembers about the logged-in person.
+
+    This route takes NO arguments at all - no id in the path, none in the
+    query. There is nothing here for anyone to change, because the only
+    thing that decides whose memories come back is the session cookie.
+    """
+    return memory.list_memories(user["id"])
+
+
+@app.post("/api/memories", status_code=201)
+def remember(request: RememberRequest, user=Depends(require_user)):
+    """Keep one fact about the logged-in person.
+
+    `Depends(require_user)` is the whole security story: it reads the session
+    cookie, so the memory is saved for whoever is actually signed in. Nothing
+    in the request body can change that.
+    """
+    try:
+        return memory.save_memory(user["id"], request.fact)
+    except memory.MemoryRefused as error:
+        # 400: "those details weren't acceptable" - an ordinary, expected answer.
+        raise HTTPException(status_code=400, detail=str(error))
 
 
 # ---------------------------------------------------------------- message actions

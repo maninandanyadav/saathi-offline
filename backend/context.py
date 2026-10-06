@@ -215,7 +215,66 @@ def with_recalled(messages, recalled):
     return messages[:-1] + [{**newest, "content": f'{note}\n\n{newest["content"]}'}]
 
 
-def build(recent, replying_to=None, summary=None, older=None):
+# ------------------------------------------- what SAATHI remembers (Step 8D)
+#
+# These are facts about the PERSON, kept across every conversation - not the
+# summary of one chat. They travel the same way the summary does, with the
+# personality rather than as messages, and that matters twice over:
+#
+#   - a memory can never be mistaken for something the person just said
+#   - the language rules read only the person's own words, so a memory
+#     written in English cannot drag a Telugu reply into English
+#
+# A long list would crowd out the conversation itself, so only the newest few
+# are carried, within their own small budget.
+MEMORY_LIMIT = 20
+MEMORY_TOKENS = 300
+
+
+def known_facts(memories):
+    """The remembered facts, as a note for the newest message - or None.
+
+    Measured, because the obvious placement did not work. Put in the
+    personality as "About this person: the user is studying BTech", the model
+    used it for an English question but ignored it completely for a Telugu or
+    Hindi one - 0 times out of 3, whether the fact was written in English or
+    in Telugu, and whichever of three wordings was tried.
+
+    Quoted here, beside their words, as something they told SAATHI before, it
+    worked 9 times out of 9 across English, Hindi and Roman Telugu. The model
+    treats a quoted thing-that-was-said as evidence; an abstract fact about a
+    third person it leaves alone.
+    """
+    if not memories:
+        return None
+
+    kept, spent = [], 0
+    for remembered in memories[:MEMORY_LIMIT]:
+        fact = remembered["fact"] if isinstance(remembered, dict) else str(remembered)
+        spent += estimate_tokens(fact)
+        if spent > MEMORY_TOKENS and kept:
+            break
+        kept.append(shorten_quote(fact))
+    return '[From earlier conversations with them: "' + '" "'.join(kept) + '"]'
+
+
+def with_memories(messages, memories):
+    """Put what SAATHI remembers in front of the newest message.
+
+    Beside their words, not in the personality - see known_facts() for the
+    measurements. It sits in front, where the language rules strip every note
+    of ours off before judging, so a memory written in English can never
+    decide that a Telugu message gets an English answer.
+    """
+    note = known_facts(memories)
+    if not note or not messages:
+        return messages
+
+    newest = messages[-1]
+    return messages[:-1] + [{**newest, "content": f'{note}\n\n{newest["content"]}'}]
+
+
+def build(recent, replying_to=None, summary=None, older=None, memories=None):
     """THE context builder: a conversation in, what the AI is told out.
 
     One place, one order:
@@ -238,10 +297,19 @@ def build(recent, replying_to=None, summary=None, older=None):
     recalled = []
     if older and messages:
         recalled = find_relevant(messages[-1]["content"], older)
-        messages = with_recalled(messages, recalled)
 
+    # The notes stack in front of the newest message, most general first:
+    #     [replying to ...] [from earlier here ...] [remembered ...] their words
+    messages = with_memories(messages, memories)
+    messages = with_recalled(messages, recalled)
     messages = with_reply_context(messages, replying_to)
-    return {"messages": messages, "background": summary or None, "recalled": recalled}
+
+    # The summary of THIS conversation still travels with the personality.
+    # Only the remembered facts moved, and only because the measurements said
+    # they had to.
+    background = ("Earlier in this conversation:\n" + summary) if summary else None
+
+    return {"messages": messages, "background": background, "recalled": recalled}
 
 
 def describe(recent, messages, summary=None):

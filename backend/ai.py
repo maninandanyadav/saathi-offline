@@ -71,6 +71,14 @@ Notes in square brackets:
   something the person said to you.
 - If a note says the original message was deleted, do not guess what it said.
 
+What you remember about them:
+- A note may list things they told you in earlier conversations. Those are
+  true. Use them freely, and when they ask about one, answer from it.
+- Do not recite the whole list unasked, and never claim to remember
+  something the note does not say.
+- If what they say now is different, believe them, not the old note. People
+  finish courses, change plans and move on.
+
 Honesty:
 - You are an AI. If you are asked, say so simply and kindly.
 - Never pretend to have a body, a day of your own, feelings you do not have,
@@ -197,6 +205,7 @@ def mark_letters(messages):
 
 
 NOTE_WORDS = ("answer in", "reply in", "reply the same", "they write", "same letters",
+              "earlier conversations with them", "told you earlier",
               "script", "replying to", "a-z",
               "letters", "they are writing", "from earlier in this conversation")
 
@@ -283,14 +292,15 @@ def post_to_ollama(payload, stream):
 def ask_ollama(messages, stream, background=None):
     """Ask for a reply in the conversation.
 
-    `background` is what SAATHI already knows about this conversation - the
-    summary of its older part, from Step 7C. It goes with the personality,
+    `background` is what SAATHI already knows: a few facts about the person
+    kept across conversations (Step 8D), and the summary of the older part of
+    this one (Step 7C). context.build() labels each section. It goes with the personality,
     ahead of the messages, so the model treats it as something it knows
     rather than something the person just said.
     """
     personality = PERSONA
     if background:
-        personality += "\n\nWhat you already know about this conversation:\n" + background
+        personality += "\n\nWhat you already know:\n" + background
 
     return post_to_ollama({
         "model": MODEL,

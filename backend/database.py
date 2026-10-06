@@ -125,6 +125,31 @@ def init_db():
         # is still sent to the AI in full.
         add_column_if_missing(connection, "conversations", "summary_upto_message_id", "INTEGER")
 
+        # ------------------------------------------ Step 8: long-term memory
+        # A few useful things SAATHI remembers about a person ACROSS
+        # conversations - their name, what they study, what they are building.
+        #
+        # Notice what it hangs from: a user, not a conversation. That is the
+        # whole point. A conversation summary lives and dies with its
+        # conversation; a memory outlives all of them.
+        #
+        # ON DELETE CASCADE means deleting an account deletes its memories
+        # with it, and UNIQUE (user_id, fact) means the database itself
+        # refuses to store the same thing twice for the same person.
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memories (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id    INTEGER NOT NULL,
+                fact       TEXT    NOT NULL COLLATE NOCASE,
+                created_at TEXT    NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT    NOT NULL DEFAULT (datetime('now')),
+                UNIQUE (user_id, fact),
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            """
+        )
+
         # Indexes work like the index at the back of a book: SQLite can jump
         # straight to one user's conversations, or one conversation's messages,
         # instead of reading every row.
@@ -136,6 +161,10 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_messages_conversation "
             "ON messages (conversation_id, id)"
         )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_user "
+            "ON memories (user_id, updated_at)"
+        )
 
 
 # Runs only when you start this file directly, so you can check the database.
@@ -145,7 +174,7 @@ if __name__ == "__main__":
         print(f"Database file: {DB_PATH}\n")
         # Table names can't use ? placeholders. That's safe here only because
         # these names are written in our own code - never taken from a user.
-        for table in ("users", "sessions", "conversations", "messages"):
+        for table in ("users", "sessions", "conversations", "messages", "memories"):
             print(f"{table} table:")
             for column in connection.execute(f"PRAGMA table_info({table})"):
                 print(f"  {column['name']:<20} {column['type']}")

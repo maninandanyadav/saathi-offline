@@ -9,7 +9,7 @@ never from anything the browser sends.
 import logging
 import threading
 
-from backend import ai, context, letters
+from backend import ai, context, letters, memory
 from backend.database import get_connection
 
 log = logging.getLogger("saathi.chat")
@@ -497,8 +497,13 @@ def prepare_reply(user_id, conversation_id):
     if latest is None or latest["sender"] != "user":
         raise NothingToReplyTo("There's no new message to reply to.")
 
+    # What SAATHI remembers about THIS person - and only this person. The id
+    # comes from the session, so there is nothing here to forge.
+    remembered = memory.list_memories(user_id)
+
     return context.build(gathered["recent_messages"], gathered["replying_to"],
-                         gathered["summary"], gathered["older_messages"])
+                         gathered["summary"], gathered["older_messages"],
+                         remembered)
 
 
 def save_saathi_message(user_id, conversation_id, text):

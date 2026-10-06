@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import sys
 import tempfile
 import unicodedata
@@ -37,7 +38,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 import requests  # noqa: E402  (imported after the setup above, on purpose)
 import uvicorn   # noqa: E402
 
-from backend import ai, chat, context, letters  # noqa: E402
+from backend import ai, chat, context, letters, memory  # noqa: E402
 from backend.database import DB_PATH, DEFAULT_DB_PATH, get_connection  # noqa: E402
 from backend.main import app  # noqa: E402
 
@@ -434,8 +435,16 @@ def run_checks():
     check("The AI is reached at 127.0.0.1 (this computer)",
           ai.OLLAMA_URL.startswith("http://127.0.0.1:"), ai.OLLAMA_URL)
     check("The model is a local one, not a cloud one", "cloud" not in ai.MODEL, ai.MODEL)
+    # Looks for a key being GIVEN A VALUE, not just the words. memory.py lists
+    # "api key" and "access token" as things it must never remember, and a
+    # bare word search called that a stored secret.
+    looks_like_a_key = re.search(
+        r"(api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token)\s*[:=]\s*[\"'][^\"']{8,}",
+        backend_code, re.I)
+    real_token = re.search(r"sk-[A-Za-z0-9]{16}|bearer\s+[A-Za-z0-9._-]{16}", backend_code, re.I)
     check("No API key or token is stored in the code",
-          not re.search("api[_-]?key|bearer |sk-[A-Za-z0-9]{8}", backend_code, re.I))
+          not looks_like_a_key and not real_token,
+          (looks_like_a_key or real_token or [""])[0] if (looks_like_a_key or real_token) else "")
 
     section("SAME LANGUAGE BACK (the real model answers)")
     telugu_chat = a.post(f"{BASE}/api/conversations").json()["id"]
@@ -513,7 +522,7 @@ def run_checks():
     notes_text = "They are building a project called SAATHI with their friend Ravi."
     plan = context.build(one_message, None, notes_text)
     check("The notes travel beside the messages, never as one of them",
-          plan["background"] == notes_text
+          notes_text in plan["background"]
           and all("SAATHI" not in m["content"] for m in plan["messages"]))
     check("No notes means nothing extra is sent", context.build(one_message)["background"] is None)
 
@@ -553,7 +562,7 @@ def run_checks():
           "ZEPHYR" not in sent_now.upper()
           or any("ZEPHYR" in m["content"].upper() for m in grown["recalled"]))
     check("...and the notes are handed to the AI with the next reply",
-          grown["background"] == written)
+          written in (grown["background"] or ""))
 
     check("The notes are written only once, not on every message",
           chat.update_summary_if_needed(user_a_id, long_chat) is None)
@@ -979,6 +988,249 @@ def run_checks():
               "".join(ai.stream_reply(marked)) == "Sare.")
     finally:
         ai.clean_pieces = kept_pieces
+
+    section("MEMORY STORAGE (8A)")
+    with get_connection() as connection:
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(memories)")}
+    check("The memories table exists, with the fields Step 8 needs",
+          {"id", "user_id", "fact", "created_at", "updated_at"} <= columns, sorted(columns))
+
+    with get_connection() as connection:
+        mine = connection.execute(
+            "SELECT id FROM users WHERE saathi_id = 'user_a'").fetchone()["id"]
+        theirs = connection.execute(
+            "SELECT id FROM users WHERE saathi_id = 'user_b'").fetchone()["id"]
+        connection.execute("INSERT INTO memories (user_id, fact) VALUES (?, ?)",
+                           (mine, "The user is studying BTech."))
+        connection.execute("INSERT INTO memories (user_id, fact) VALUES (?, ?)",
+                           (theirs, "This person likes cricket."))
+
+    with get_connection() as connection:
+        ours = [r["fact"] for r in connection.execute(
+            "SELECT fact FROM memories WHERE user_id = ?", (mine,))]
+    check("A memory belongs to one person only",
+          ours == ["The user is studying BTech."], ours)
+
+    duplicated = True
+    try:
+        with get_connection() as connection:
+            connection.execute("INSERT INTO memories (user_id, fact) VALUES (?, ?)",
+                               (mine, "the user IS studying btech."))
+    except sqlite3.IntegrityError:
+        duplicated = False
+    check("The database itself refuses the same fact twice, whatever the capitals",
+          not duplicated)
+
+    with get_connection() as connection:
+        connection.execute("INSERT INTO memories (user_id, fact) VALUES (?, ?)",
+                           (theirs, "The user is studying BTech."))
+        shared = connection.execute(
+            "SELECT COUNT(*) c FROM memories WHERE fact = 'The user is studying BTech.'").fetchone()["c"]
+    check("...but two different people may remember the same thing", shared == 2, shared)
+
+    section("SAVING A MEMORY (8B)")
+    saved = a.post(f"{BASE}/api/memories", json={"fact": "The user is studying BTech."})
+    check("A memory is saved", saved.status_code == 201, saved.status_code)
+    check("...and sent back without the owner's id",
+          set(saved.json()) == {"id", "fact", "created_at", "updated_at"}, sorted(saved.json()))
+
+    for empty in ["", "   ", "\t\n ", "..."]:
+        check(f"{empty!r} is refused",
+              a.post(f"{BASE}/api/memories", json={"fact": empty}).status_code == 400)
+    check("A whole essay is refused",
+          a.post(f"{BASE}/api/memories", json={"fact": "x " * 400}).status_code == 400)
+    check("A request with no fact at all is refused",
+          a.post(f"{BASE}/api/memories", json={}).status_code == 422)
+
+    tidied = a.post(f"{BASE}/api/memories",
+                    json={"fact": "   The user   is studying    BTech.   "}).json()
+    check("Extra spaces are tidied away", tidied["fact"] == "The user is studying BTech.",
+          repr(tidied["fact"]))
+    check("...and tidying makes it the SAME memory, not a second one",
+          tidied["id"] == saved.json()["id"], f"{tidied['id']} vs {saved.json()['id']}")
+
+    first = a.post(f"{BASE}/api/memories", json={"fact": "The user is learning Java."}).json()
+    again = a.post(f"{BASE}/api/memories", json={"fact": "the user IS learning java."}).json()
+    check("The same fact twice gives back the first memory", first["id"] == again["id"])
+    with get_connection() as connection:
+        java_rows = connection.execute(
+            "SELECT COUNT(*) c FROM memories WHERE fact LIKE '%Java%'").fetchone()["c"]
+    check("...and only one row exists for it", java_rows == 1, java_rows)
+
+    check("Not logged in -> refused",
+          anyone.post(f"{BASE}/api/memories", json={"fact": "Sneaky."}).status_code == 401)
+
+    for secret in ["My password is bluepeak77", "my API key is sk-abcdefgh",
+                   "my card cvv is 123"]:
+        check(f"Refuses to remember: {secret[:26]}",
+              a.post(f"{BASE}/api/memories", json={"fact": secret}).status_code == 400)
+
+    b.post(f"{BASE}/api/memories", json={"fact": "The user likes cricket."})
+    with get_connection() as connection:
+        mine = [r["fact"] for r in connection.execute(
+            "SELECT fact FROM memories WHERE user_id = "
+            "(SELECT id FROM users WHERE saathi_id = 'user_a') ORDER BY id")]
+        theirs = [r["fact"] for r in connection.execute(
+            "SELECT fact FROM memories WHERE user_id = "
+            "(SELECT id FROM users WHERE saathi_id = 'user_b') ORDER BY id")]
+    check("Each person's memories stay their own",
+          "The user likes cricket." in theirs and "The user likes cricket." not in mine)
+    check("...and one person's fact never lands on the other",
+          "The user is learning Java." in mine and "The user is learning Java." not in theirs)
+
+    check("The saved user id comes from the session, not the request",
+          a.post(f"{BASE}/api/memories",
+                 json={"fact": "Planted on someone else.", "user_id": 999}).status_code == 201)
+    with get_connection() as connection:
+        planted = connection.execute(
+            "SELECT user_id FROM memories WHERE fact = 'Planted on someone else.'").fetchone()
+        owner = connection.execute(
+            "SELECT id FROM users WHERE saathi_id = 'user_a'").fetchone()["id"]
+    check("...so a user_id in the body is simply ignored",
+          planted["user_id"] == owner, f"{planted['user_id']} vs {owner}")
+
+    section("READING MEMORIES BACK (8C)")
+    mine_now = a.get(f"{BASE}/api/memories")
+    check("Memories come back", mine_now.status_code == 200, mine_now.status_code)
+    facts = [m["fact"] for m in mine_now.json()]
+    check("...all of this person's own", "The user is studying BTech." in facts
+          and "The user is learning Java." in facts, facts)
+    check("...newest first",
+          mine_now.json()[0]["id"] > mine_now.json()[-1]["id"],
+          [m["id"] for m in mine_now.json()])
+    check("...with no owner id attached",
+          all(set(m) == {"id", "fact", "created_at", "updated_at"} for m in mine_now.json()))
+
+    newcomer = new_user("user_with_nothing")
+    empty = newcomer.get(f"{BASE}/api/memories")
+    check("Somebody with no memories gets an empty list, not an error",
+          empty.status_code == 200 and empty.json() == [], empty.json())
+
+    theirs = [m["fact"] for m in b.get(f"{BASE}/api/memories").json()]
+    check("Each person sees only their own",
+          "The user likes cricket." in theirs
+          and "The user is learning Java." not in theirs, theirs)
+
+    with get_connection() as connection:
+        other_id = connection.execute(
+            "SELECT id FROM users WHERE saathi_id = 'user_b'").fetchone()["id"]
+    sneaky = {
+        "a query parameter": a.get(f"{BASE}/api/memories?user_id={other_id}"),
+        "another parameter": a.get(f"{BASE}/api/memories?id={other_id}"),
+        "a forged header": a.get(f"{BASE}/api/memories",
+                                 headers={"X-User-Id": str(other_id)}),
+        "a body on a GET": a.request("GET", f"{BASE}/api/memories",
+                                     json={"user_id": other_id}),
+    }
+    for how, answer in sneaky.items():
+        leaked = answer.status_code == 200 and any(
+            m["fact"] == "The user likes cricket." for m in answer.json())
+        check(f"Cannot reach someone else's memories with {how}", not leaked)
+    check("There is no route that takes a memory owner's id at all",
+          a.get(f"{BASE}/api/memories/{other_id}").status_code == 404)
+    check("Not logged in -> refused",
+          anyone.get(f"{BASE}/api/memories").status_code == 401)
+
+    section("MEMORY REACHES THE AI (8D)")
+    facts = [{"fact": "The user is studying BTech."}, {"fact": "The user is learning Java."}]
+    with_memory = context.build([{"sender": "user", "content": "What am I studying?"}],
+                                None, None, None, facts)
+    newest_text = with_memory["messages"][-1]["content"]
+    check("Remembered facts are put in front of the newest message",
+          "BTech" in newest_text and "Java" in newest_text)
+    check("...as something they said before, not as a message of their own",
+          newest_text.startswith("[From earlier conversations with them:"))
+    check("...and their own words still come last",
+          newest_text.rstrip().endswith("What am I studying?"))
+    check("Nothing is added when there is nothing remembered",
+          context.build([{"sender": "user", "content": "hi"}])["messages"][-1]["content"] == "hi")
+
+    check("Memory does not travel in the conversation summary",
+          with_memory["background"] is None)
+    summarised = context.build([{"sender": "user", "content": "hi"}], None,
+                               "They were tired.", None, facts)
+    check("...and a summary still travels the old way",
+          "Earlier in this conversation" in summarised["background"]
+          and "BTech" not in summarised["background"])
+
+    check("An English memory cannot make a Telugu message answer in English",
+          "Telugu" in ai.which_letters(
+              context.build([{"sender": "user", "content": "నేను ఏమి చదువుతున్నాను?"}],
+                            None, None, None, facts)["messages"][-1]["content"]))
+    check("...nor the other way round",
+          ai.which_letters(
+              context.build([{"sender": "user", "content": "What am I studying?"}], None, None,
+                            None, [{"fact": "ఈ వ్యక్తి బీటెక్ చదువుతున్నారు."}]
+                            )["messages"][-1]["content"]) == "[Reply in English.]")
+
+    many = [{"fact": f"The user knows fact number {n} which is written out at some length."}
+            for n in range(60)]
+    crowded = context.build([{"sender": "user", "content": "hi"}], None, None, None, many)
+    check("A long list of memories is trimmed, not dumped whole",
+          crowded["messages"][-1]["content"].count("fact number") <= context.MEMORY_LIMIT,
+          crowded["messages"][-1]["content"].count("fact number"))
+
+    with get_connection() as connection:
+        me = connection.execute("SELECT id FROM users WHERE saathi_id = 'user_a'").fetchone()["id"]
+        them = connection.execute("SELECT id FROM users WHERE saathi_id = 'user_b'").fetchone()["id"]
+    my_chat = chat.create_conversation(me)["id"]
+    chat.add_user_message(me, my_chat, "What do I do?")
+    mine_plan = chat.prepare_reply(me, my_chat)
+    their_chat = chat.create_conversation(them)["id"]
+    chat.add_user_message(them, their_chat, "What do I do?")
+    their_plan = chat.prepare_reply(them, their_chat)
+    check("One person's memories reach their own prompt",
+          "BTech" in mine_plan["messages"][-1]["content"])
+    # "BTech" is no good here: an earlier check deliberately gave BOTH people
+    # that same fact. "Java" belongs to user_a alone.
+    check("...and never anybody else's",
+          "Java" not in their_plan["messages"][-1]["content"]
+          and "cricket" in their_plan["messages"][-1]["content"],
+          their_plan["messages"][-1]["content"][:70])
+
+    section("THE SAME FACT SAID TWO WAYS (8E)")
+    for one, other, same in [
+        ("The user is studying BTech.", "The user studies BTech.", True),
+        ("The user is studying BTech.", "User is a BTech student.", True),
+        ("The user is studying BTech.", "The user finished BTech.", True),
+        ("The user's name is Shivani.", "The user is called Shivani.", True),
+        ("The user likes cricket.", "The user likes football.", False),
+        ("The user is learning Java.", "The user is learning Python.", False),
+        ("The user is learning Java.", "The user is studying BTech.", False),
+    ]:
+        check(f"{'same' if same else 'different'}: {one[:26]} / {other[:26]}",
+              memory.about_the_same(one, other) == same)
+    check("Two memories with nothing distinctive left are never merged blindly",
+          not memory.about_the_same("The user likes it.", "The user knows that."))
+
+    with get_connection() as connection:
+        me = connection.execute("SELECT id FROM users WHERE saathi_id = 'user_a'").fetchone()["id"]
+        them = connection.execute("SELECT id FROM users WHERE saathi_id = 'user_b'").fetchone()["id"]
+
+    before_count = len(memory.list_memories(me))
+    first = memory.save_memory(me, "The user plays the guitar.")
+    again = memory.save_memory(me, "The user plays guitar every evening.")
+    check("A near-copy updates the memory instead of adding one",
+          first["id"] == again["id"], f"{first['id']} vs {again['id']}")
+    check("...so the number of memories does not grow",
+          len(memory.list_memories(me)) == before_count + 1)
+    check("...and the newer wording is the one kept",
+          "every evening" in again["fact"], again["fact"])
+    check("...while the memory keeps the day it was first learned",
+          again["created_at"] == first["created_at"])
+    check("...and records that it changed", again["updated_at"] >= first["updated_at"])
+
+    separate = memory.save_memory(me, "The user plays chess on Sundays.")
+    check("A genuinely different fact still gets its own memory",
+          separate["id"] != first["id"], f"{separate['id']} vs {first['id']}")
+
+    check("Nobody can rewrite someone else's memory, whatever id they use",
+          memory.replace_memory(them, first["id"], "Planted by somebody else.") is None)
+    with get_connection() as connection:
+        untouched = connection.execute(
+            "SELECT fact FROM memories WHERE id = ?", (first["id"],)).fetchone()["fact"]
+    check("...and the real memory is unchanged",
+          "Planted" not in untouched, untouched)
 
     section("LOGOUT")
     copied_token = a.cookies.get("saathi_session")
