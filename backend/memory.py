@@ -246,3 +246,89 @@ def save_memory(user_id, fact):
         ).fetchone()
 
     return memory_to_dict(row)
+
+
+# ------------------------- "what do you remember about me?" (Step 8H)
+#
+# This one question is answered from the database, not by the model.
+#
+# Asked directly, the model did list all four facts - but as a flowing
+# sentence, and a model can always paraphrase a fact into something the
+# person never said. When somebody asks what is being kept about them, the
+# answer has to be exactly what is kept, word for word, every time.
+
+# A remembering word AND a phrase meaning "about me" must both appear, so
+# "I must remember to call her" is not mistaken for the question.
+REMEMBER_WORDS = ("remember", "remembered", "గుర్తు", "gurthu", "gurtu",
+                  "याद", "yaad", "yad")
+ABOUT_ME = ("about me", "about myself", "of me",
+            "నా గురించి", "naa gurinchi", "na gurinchi",
+            "मेरे बारे", "mere bare", "mere baare")
+
+# One sentence each, written out rather than translated by the model, so the
+# wording never drifts and never invents.
+LEAD_IN = {
+    "telugu-script": "మీ గురించి నాకు గుర్తున్నవి:",
+    "telugu-latin": "Mee gurinchi naku gurthunnavi:",
+    "hindi-script": "मुझे आपके बारे में यह याद है:",
+    "hindi-latin": "Mujhe tumhare baare mein yeh yaad hai:",
+    "english": "Here's what I remember about you:",
+}
+NOTHING_YET = {
+    "telugu-script": "మీ గురించి నాకు ఇంకా ఏమీ గుర్తు లేదు.",
+    "telugu-latin": "Mee gurinchi naku inka emi gurthu ledu.",
+    "hindi-script": "मुझे अभी आपके बारे में कुछ भी याद नहीं है.",
+    "hindi-latin": "Mujhe abhi tumhare baare mein kuch bhi yaad nahi hai.",
+    "english": "I don't have any saved memories about you yet.",
+}
+
+
+def asked_about_memories(text):
+    """Is this person asking what SAATHI remembers about them?"""
+    if not text:
+        return False
+    asking = text.lower()
+    return (any(word in asking for word in REMEMBER_WORDS)
+            and any(phrase in asking for phrase in ABOUT_ME))
+
+
+def their_style(question):
+    """Which written-out sentence to use, from the question's own language."""
+    found = context.letters_profile(question)
+    language, script = found["language"], found["script"]
+    if language == "telugu":
+        return "telugu-script" if script == "telugu" else "telugu-latin"
+    if language == "hindi":
+        return "hindi-script" if script == "devanagari" else "hindi-latin"
+    return "english"
+
+
+def as_told_to_them(fact):
+    """"The user is studying BTech." -> "You are studying BTech."
+
+    Only the opening is changed, and only when it is one SAATHI wrote itself.
+    Anything else is shown exactly as it is stored - a memory is never
+    reworded into something the person did not say.
+    """
+    for third_person, second_person in (("The user's ", "Your "),
+                                        ("the user's ", "your "),
+                                        ("The user is ", "You are "),
+                                        ("the user is ", "you are "),
+                                        ("The user has ", "You have "),
+                                        ("The user ", "You "),
+                                        ("the user ", "you ")):
+        if fact.startswith(third_person):
+            return second_person + fact[len(third_person):]
+    return fact
+
+
+def what_i_remember(user_id, question=""):
+    """The answer to "what do you remember about me?", straight from storage."""
+    style = their_style(question)
+    remembered = list_memories(user_id)
+    if not remembered:
+        return NOTHING_YET[style]
+
+    lines = [LEAD_IN[style]]
+    lines += [f"• {as_told_to_them(one['fact'])}" for one in remembered]
+    return "\n".join(lines)

@@ -501,9 +501,11 @@ def prepare_reply(user_id, conversation_id):
     # comes from the session, so there is nothing here to forge.
     remembered = memory.list_memories(user_id)
 
-    return context.build(gathered["recent_messages"], gathered["replying_to"],
+    plan = context.build(gathered["recent_messages"], gathered["replying_to"],
                          gathered["summary"], gathered["older_messages"],
                          remembered)
+    plan["their_words"] = latest["content"]      # before any note of ours
+    return plan
 
 
 def save_saathi_message(user_id, conversation_id, text):
@@ -523,7 +525,14 @@ def add_saathi_reply(user_id, conversation_id):
     plan = prepare_reply(user_id, conversation_id)
     if plan is None:
         return None
-    text = ai.reply(plan["messages"], plan["background"])
+
+    # "What do you remember about me?" is answered from the database itself.
+    # A model could paraphrase a fact into something they never said, and
+    # this is the one question where that would be a betrayal.
+    if memory.asked_about_memories(plan["their_words"]):
+        text = memory.what_i_remember(user_id, plan["their_words"])
+    else:
+        text = ai.reply(plan["messages"], plan["background"])
     saved = save_saathi_message(user_id, conversation_id, text)
     if saved is None:
         return None

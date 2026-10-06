@@ -255,6 +255,17 @@ def reply_streaming(conversation_id: int, user=Depends(require_user)):
     as_they_write = letters.AsTheyWrite(chat.how_they_write(user["id"], conversation_id))
 
     def lines():
+        # "What do you remember about me?" is answered from the database, not
+        # by the model, so the facts come back word for word (Step 8H). There
+        # is nothing to stream: it arrives whole.
+        if memory.asked_about_memories(plan["their_words"]):
+            answer = memory.what_i_remember(user["id"], plan["their_words"])
+            yield json.dumps({"chunk": answer}) + "\n"
+            saved = chat.save_saathi_message(user["id"], conversation_id, answer)
+            if saved is not None:
+                yield json.dumps({"message": saved}) + "\n"
+            return
+
         pieces = []
         try:
             for piece in ai.stream_reply(plan["messages"], plan["background"]):

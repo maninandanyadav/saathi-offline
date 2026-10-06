@@ -331,3 +331,10 @@ def describe(recent, messages, summary=None):
         "roughly how long the model takes to read it": f"{tokens / 40:.0f}s if it has been away",
         "a reply note is attached": bool(messages) and messages[-1]["content"].startswith("["),
     }
+
+
+def letters_profile(text):
+    """The language profile of a message. Lives here so memory.py can ask for
+    it without importing letters.py and making a circle of imports."""
+    from backend import letters
+    return letters.profile(text)

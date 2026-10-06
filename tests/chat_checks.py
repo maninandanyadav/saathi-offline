@@ -1312,6 +1312,67 @@ def run_checks():
     check("...and reads the list back from the server rather than guessing",
           "renderMemories(await api(\"/api/memories\"))" in screen)
 
+    section("WHAT DO YOU REMEMBER ABOUT ME (8H)")
+    for question, is_it in [
+        ("What do you remember about me?", True),
+        ("what do u remember about me", True),
+        ("Naa gurinchi em gurthu undi?", True),
+        ("నా గురించి ఏమి గుర్తు ఉంది?", True),
+        ("मेरे बारे में तुम्हें क्या याद है?", True),
+        ("I must remember to call her.", False),
+        ("Remember my exam is tomorrow.", False),
+        ("What am I studying?", False),
+        ("", False),
+    ]:
+        check(f"{'asks' if is_it else 'does not ask'}: {question[:30] or '(empty)'}",
+              memory.asked_about_memories(question) == is_it)
+
+    with get_connection() as connection:
+        owner = connection.execute(
+            "SELECT id FROM users WHERE saathi_id = 'user_a'").fetchone()["id"]
+        stranger = connection.execute(
+            "SELECT id FROM users WHERE saathi_id = 'user_b'").fetchone()["id"]
+    memory.save_memory(owner, "The user is studying BTech.")
+
+    told = memory.what_i_remember(owner, "What do you remember about me?")
+    check("The answer is a list, one memory to a line", told.count("•") >= 1, told[:60])
+    check("...with the real stored words, not a retelling", "studying BTech" in told)
+    check("...turned round to speak to them", "You are studying BTech." in told, told)
+    check("...and never another person's memory", "cricket" not in told)
+
+    every_fact = {one["fact"] for one in memory.list_memories(owner)}
+    listed = {line[2:] for line in told.splitlines() if line.startswith("• ")}
+    check("Every memory is listed and nothing is made up",
+          len(listed) == len(every_fact), f"{len(listed)} shown, {len(every_fact)} held")
+
+    check("The lead-in follows the question's language",
+          memory.what_i_remember(owner, "నా గురించి ఏమి గుర్తు ఉంది?").startswith("మీ గురించి")
+          and memory.what_i_remember(owner, "What do you remember about me?").startswith("Here's"))
+
+    empty_person = new_user("no_memories_yet")
+    with get_connection() as connection:
+        empty_id = connection.execute(
+            "SELECT id FROM users WHERE saathi_id = 'no_memories_yet'").fetchone()["id"]
+    check("Nothing remembered is said plainly, with nothing invented",
+          memory.what_i_remember(empty_id, "What do you remember about me?")
+          == "I don't have any saved memories about you yet.")
+    check("...in their language too",
+          "గుర్తు లేదు" in memory.what_i_remember(empty_id, "నా గురించి ఏమి గుర్తు ఉంది?"))
+
+    asking = a.post(f"{BASE}/api/conversations").json()["id"]
+    send(a, asking, "What do you remember about me?")
+    answered = ask_reply(a, asking)
+    check("Asking in a real conversation gives the same list",
+          answered.status_code == 201 and "•" in answered.json()["content"]
+          and "BTech" in answered.json()["content"], answered.json().get("content", "")[:60])
+
+    forgettable = memory.save_memory(owner, "The user owns a yellow kite.")
+    check("A new memory appears in the answer",
+          "yellow kite" in memory.what_i_remember(owner, "What do you remember about me?"))
+    memory.delete_memory(owner, forgettable["id"])
+    check("...and leaves it the moment it is forgotten",
+          "yellow kite" not in memory.what_i_remember(owner, "What do you remember about me?"))
+
     section("LOGOUT")
     copied_token = a.cookies.get("saathi_session")
     a.post(f"{BASE}/api/logout")
